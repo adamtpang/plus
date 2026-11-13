@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -25,6 +25,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
+const VERSION = "0.2.0"; // kept equal to package.json by a test
 
 // ---- small helpers, exported for the tests ----
 
@@ -83,6 +84,42 @@ export function surplusEnv(key, base = BASE) {
     OPENAI_API_KEY: key,
   };
 }
+
+// How to start each known coding tool on Surplus: the program, any arguments
+// to put in front of the user's own, and the environment to add. Returns
+// null for a tool we have no recipe for (`run` still works for those).
+// `models` is only needed by opencode, which must be told which models exist.
+export function launcher(tool, key, base = BASE, models = []) {
+  const env = surplusEnv(key, base);
+  if (tool === "claude" || tool === "aider") return { program: tool, args: [], env };
+  if (tool === "codex") {
+    // Codex is told about Surplus through its own -c settings, so this works
+    // whether or not you are signed in to Codex with another account.
+    const settings = [
+      "model_provider=surplus",
+      "model_providers.surplus.name=Surplus",
+      `model_providers.surplus.base_url=${base}/v1`,
+      "model_providers.surplus.env_key=SURPLUS_API_KEY",
+      "model_providers.surplus.wire_api=responses",
+    ];
+    return { program: "codex", args: settings.flatMap((s) => ["-c", s]), env: { ...env, SURPLUS_API_KEY: key } };
+  }
+  if (tool === "opencode") {
+    const config = {
+      provider: {
+        surplus: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Surplus",
+          options: { baseURL: `${base}/v1`, apiKey: key },
+          models: Object.fromEntries(models.map((id) => [id, {}])),
+        },
+      },
+    };
+    return { program: "opencode", args: [], env: { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } };
+  }
+  return null;
+}
+const LAUNCHERS = ["claude", "codex", "aider", "opencode"];
 
 // ---- key handling ----
 
@@ -270,12 +307,23 @@ async function topup(amount, flags) {
   console.log(`No credit yet after 10 minutes. Check later with: ${NAME} balance`);
 }
 
-async function balance() {
+async function balance(flags = {}) {
   const [bal, saved] = await Promise.all([
     api("/v1/payments/balance"),
     api("/v1/buyer/savings?period=all_time"),
   ]);
   const s = saved.summary ?? {};
+  if (flags.json) {
+    return console.log(
+      JSON.stringify({
+        credit_usd: dollars(bal.credit_balance_usdc),
+        spent_usd: dollars(s.total_actual_usdc),
+        list_usd: dollars(s.total_direct_usdc),
+        saved_usd: dollars(s.total_saved_usdc),
+        requests: s.request_count ?? 0,
+      }),
+    );
+  }
   console.log(`Credit available  ${usd(dollars(bal.fiat_available_usdc))}`);
   if (Number(bal.usdc_available_usdc) > 0) console.log(`USDC available    ${usd(dollars(bal.usdc_available_usdc))}`);
   console.log(`Spent so far      ${usd(dollars(s.total_actual_usdc))} over ${s.request_count ?? 0} requests`);
@@ -284,8 +332,9 @@ async function balance() {
 }
 
 // What you saved, model by model.
-async function savings() {
+async function savings(flags = {}) {
   const saved = await api("/v1/buyer/savings?period=all_time");
+  if (flags.json) return console.log(JSON.stringify(saved.by_model ?? []));
   const rows = (saved.by_model ?? []).map((m) => [
     m.model,
     m.requests,
@@ -299,9 +348,10 @@ async function savings() {
 }
 
 // The cheapest sellers for one model right now, against its list price.
-async function price(model) {
+async function price(model, flags = {}) {
   if (!model) fail(`Usage: ${NAME} price <model>   (for example: ${NAME} price gpt-4o-mini)`);
   const market = await api(`/api/markets/${encodeURIComponent(model)}`);
+  if (flags.json) return console.log(JSON.stringify(market));
   const live = (market.offers ?? []).filter((o) => o.available && o.healthy).slice(0, 5);
   if (live.length === 0) return console.log(`No seller is live for ${model} right now.`);
 
@@ -324,6 +374,7 @@ async function price(model) {
 async function logs(flags) {
   const limit = Math.min(Number(flags.limit ?? 10) || 10, 50);
   const { items = [] } = await api(`/v1/requests?limit=${limit}`);
+  if (flags.json) return console.log(JSON.stringify(items));
   if (items.length === 0) return console.log("No requests yet.");
   const rows = items.map((r) => [
     r.created_at.slice(5, 16).replace("T", " "),
@@ -337,9 +388,18 @@ async function logs(flags) {
   console.log(table([["WHEN (UTC)", "MODEL", "STATUS", "OUT", "PAID", "LIST", "FIRST BYTE"], ...rows]));
 }
 
-async function ask(prompt, flags) {
-  if (!prompt) fail(`Usage: ${NAME} ask "your question" [-m model]`);
+async function ask(prompt, flags) { // prompt may gain piped text below
+  // --stdin adds whatever was piped in, so `cat notes.txt | plus ask "Summarise:" --stdin` works.
+  // It is a flag, not automatic, because a program that starts us with an
+  // open but silent pipe would otherwise leave us waiting on it forever.
+  if (flags.stdin) {
+    let piped = "";
+    for await (const chunk of process.stdin) piped += chunk;
+    prompt = [prompt, piped.trim()].filter(Boolean).join("\n\n");
+  }
+  if (!prompt) fail(`Usage: ${NAME} ask "your question" [-m model] [--stdin]`);
   const model = flags.model ?? DEFAULT_MODEL;
+  let requestId = null;
   const started = performance.now();
   let firstToken = null;
   let usage = null;
@@ -385,6 +445,7 @@ async function ask(prompt, flags) {
       }),
     });
     if (!res.ok) fail(`chat answered ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    requestId = res.headers.get("x-request-id");
 
     // Read the stream line by line and print text as it arrives. A chunk can
     // end in the middle of a line, so the unfinished part waits in `buffer`.
@@ -413,10 +474,13 @@ async function ask(prompt, flags) {
 
   // The receipt: what it cost against the list price for the same tokens.
   const paid = dollars(usage?.buyer_cost_micro);
-  const info = await api(`/v1/models/${encodeURIComponent(model)}`).catch(() => null);
+  const [info, seller] = await Promise.all([
+    api(`/v1/models/${encodeURIComponent(model)}`).catch(() => null),
+    sellerOf(requestId),
+  ]);
   const list = listPrice(info?.pricing, usage);
   const parts = [
-    model,
+    seller ? `${model} via ${seller}` : model,
     firstToken ? `first token ${((firstToken - started) / 1000).toFixed(1)} s` : "no text",
     `total ${(total / 1000).toFixed(1)} s`,
     usage ? `${usage.completion_tokens} tokens` : null,
@@ -427,14 +491,116 @@ async function ask(prompt, flags) {
   console.log(`\n\n· ${parts.join(" · ")}`);
 }
 
+// Which seller served a request. The answer itself does not say, so we look
+// the request up in the account's own log by its id. Best effort: the log
+// can lag, and a missing name must never break the receipt.
+async function sellerOf(requestId) {
+  if (!requestId) return null;
+  const log = await api("/v1/requests?limit=5").catch(() => null);
+  return log?.items?.find((r) => r.request_id === requestId)?.provider ?? null;
+}
+
+// One prompt, several models, side by side: the answer, the wait and the cost.
+async function compare(prompt, flags) {
+  const models = (flags.model ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+  if (!prompt || models.length < 2) fail(`Usage: ${NAME} compare "your question" -m model-a,model-b`);
+  const waitMs = (Number(flags.wait ?? 90) || 90) * 1000;
+  const key = apiKey();
+
+  const one = async (model) => {
+    const started = performance.now();
+    try {
+      const res = await fetch(`${BASE}/v1/chat/completions`, {
+        method: "POST",
+        signal: AbortSignal.timeout(waitMs),
+        headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] }),
+      });
+      const seconds = (performance.now() - started) / 1000;
+      if (!res.ok) return { model, error: `answered ${res.status}` };
+      const body = await res.json();
+      const info = await api(`/v1/models/${encodeURIComponent(model)}`).catch(() => null);
+      return {
+        model,
+        seconds,
+        text: body.choices?.[0]?.message?.content ?? "",
+        tokens: body.usage?.completion_tokens,
+        paid: dollars(body.usage?.buyer_cost_micro),
+        list: listPrice(info?.pricing, body.usage),
+      };
+    } catch (err) {
+      return { model, error: err.name === "TimeoutError" ? `no answer in ${waitMs / 1000} s` : err.message };
+    }
+  };
+  const results = await Promise.all(models.map(one)); // all at once, so the wait is the slowest one
+
+  if (flags.json) return console.log(JSON.stringify(results, null, 2));
+  const rows = results.map((r) =>
+    r.error
+      ? [r.model, r.error, "", "", "", ""]
+      : [r.model, `${r.seconds.toFixed(1)} s`, r.tokens ?? "", usd(r.paid), r.list ? usd(r.list) : "", r.list && r.paid > 0 ? `${savedPct(r.paid, r.list)}%` : ""],
+  );
+  console.log(table([["MODEL", "TIME", "TOKENS", "COST", "LIST", "SAVED"], ...rows]));
+  for (const r of results) if (!r.error) console.log(`\n── ${r.model}\n${r.text.trim()}`);
+}
+
+// Is a program on the PATH? Checks each folder for the name, with the
+// endings Windows adds (.exe, .cmd).
+function onPath(program) {
+  const endings = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD").split(";") : [""];
+  return (process.env.PATH ?? "")
+    .split(process.platform === "win32" ? ";" : ":")
+    .some((dir) => endings.some((end) => existsSync(join(dir, program + end))));
+}
+
+// A quick health check: the things that go wrong, tested one by one.
+async function doctor() {
+  const lines = [];
+  let healthy = true;
+  const check = (ok, text) => {
+    lines.push(`${ok ? "ok  " : "FAIL"}  ${text}`);
+    healthy &&= ok;
+  };
+
+  const node = Number(process.versions.node.split(".")[0]);
+  check(node >= 18, `Node ${process.versions.node}${node >= 18 ? "" : " is too old, 18 or newer is needed"}`);
+
+  const key = process.env.SURPLUS_API_KEY || readConfig().apiKey;
+  check(!!key, key ? "API key found" : `No API key. Run: ${NAME} login   or   ${NAME} signup`);
+  if (key) {
+    const res = await fetch(`${BASE}/v1/payments/balance`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(15_000),
+    }).catch((err) => err);
+    if (res instanceof Error) check(false, `Surplus did not answer at ${BASE}: ${res.message}`);
+    else if (!res.ok) check(false, `API key was refused by Surplus (status ${res.status})`);
+    else {
+      check(true, "API key works");
+      const credit = dollars((await res.json()).credit_balance_usdc);
+      check(credit > 0, `Credit ${usd(credit)}${credit > 0 ? "" : `. Add some with: ${NAME} topup 10`}`);
+    }
+  }
+  const found = LAUNCHERS.filter(onPath);
+  lines.push(`      Tools found: ${found.length ? found.map((t) => `${NAME} ${t}`).join(", ") : "none"}`);
+
+  console.log(lines.join("\n"));
+  if (!healthy) process.exitCode = 1;
+}
+
 // Start another program with its settings pointed at Surplus. Everything
-// after the program's name is passed through untouched.
-function run(program, args) {
+// after the program's name is passed through untouched. A known tool gets
+// its own recipe from launcher(); anything else gets the general settings.
+async function run(program, userArgs) {
   if (!program) fail(`Usage: ${NAME} run <program> [its arguments]`);
+  const key = apiKey();
+  // opencode has to be told which models exist, so ask Surplus for the list.
+  const models = program === "opencode" ? ((await api("/v1/models", key)).data ?? []).map((m) => m.id) : [];
+  const recipe = launcher(program, key, BASE, models) ?? { program, args: [], env: surplusEnv(key) };
+  const args = [...recipe.args, ...userArgs];
   const windows = process.platform === "win32";
   // On Windows the program may be a .cmd file, which needs a shell, and a
   // shell takes one command line, with arguments that have spaces quoted.
-  const options = { stdio: "inherit", env: { ...process.env, ...surplusEnv(apiKey()) } };
+  const options = { stdio: "inherit", env: { ...process.env, ...recipe.env } };
   const quote = (a) => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a);
   const child = windows
     ? spawn([program, ...args.map(quote)].join(" "), { ...options, shell: true })
@@ -456,20 +622,29 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} topup --usdc                 where to send USDC instead
   ${NAME} ask "question" [-m model]    stream an answer, then show its cost
                                       (--wait 90: seconds of silence before giving up)
+                                      (--stdin: add piped text to the question)
+  ${NAME} compare "question" -m a,b    one question, several models, side by side
   ${NAME} balance                      credit left and money saved
   ${NAME} savings                      what you saved, model by model
   ${NAME} price <model>                cheapest live sellers against list price
   ${NAME} logs [-n 10]                 your recent requests
+  ${NAME} doctor                       check your setup, one thing at a time
   ${NAME} claude [arguments]           Claude Code, running on Surplus
-  ${NAME} run <program> [arguments]    any tool, pointed at Surplus
+  ${NAME} codex [arguments]            Codex, running on Surplus
+  ${NAME} aider [arguments]            aider, running on Surplus
+  ${NAME} opencode [arguments]         OpenCode, running on Surplus
+  ${NAME} run <program> [arguments]    any other tool, pointed at Surplus
+
+  balance, savings, price, logs and compare take --json for scripts.
 `;
 
 async function main() {
   // The launchers pass every later argument through, so they skip our own
   // flag parsing.
   const [first, ...passthrough] = process.argv.slice(2);
-  if (first === "claude") return run("claude", passthrough);
+  if (LAUNCHERS.includes(first)) return run(first, passthrough);
   if (first === "run") return run(passthrough[0], passthrough.slice(1));
+  if (first === "--version" || first === "-v") return console.log(VERSION);
 
   const { positionals, values } = parseArgs({
     allowPositionals: true,
@@ -483,6 +658,8 @@ async function main() {
       yes: { type: "boolean", short: "y" },
       usdc: { type: "boolean" },
       "no-open": { type: "boolean" },
+      stdin: { type: "boolean" },
+      json: { type: "boolean" },
     },
   });
   const [command, ...rest] = positionals;
@@ -490,11 +667,13 @@ async function main() {
   if (command === "signup") return signup(values);
   if (command === "login") return login(values);
   if (command === "topup") return topup(rest[0], values);
-  if (command === "balance") return balance();
-  if (command === "savings") return savings();
-  if (command === "price") return price(rest[0]);
+  if (command === "balance") return balance(values);
+  if (command === "savings") return savings(values);
+  if (command === "price") return price(rest[0], values);
   if (command === "logs") return logs(values);
   if (command === "ask") return ask(rest.join(" "), values);
+  if (command === "compare") return compare(rest.join(" "), values);
+  if (command === "doctor") return doctor();
   fail(`Unknown command "${command}".\n\n${HELP}`);
 }
 
