@@ -7,5 +7,5 @@
 - Never print an API key or a private key.
 - Never copy code from Surplus's private repositories into this one.
 - No em dashes anywhere.
-- The repo is private. Do not make it public, publish to npm, or push a release without Adam's explicit go.
+- The repo is public. Everything committed here is visible to anyone: no call notes, prices from private conversations, or names of people. Do not publish to npm or push a release without Adam's explicit go.
 - `Aether/surplusminus/cli/` still holds an older copy that the live installer serves. This repo is the one to change; the old copy gets replaced when this goes public.

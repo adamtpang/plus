@@ -19,15 +19,7 @@ connection between a client and server by sending periodic signals...
 
 ## Install
 
-Needs Node 18 or newer.
-
-While this repository is private, run it from a checkout:
-
-```bash
-npm link
-```
-
-Once it is public, one line will do it. Mac and Linux:
+Needs Node 18 or newer. Mac and Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adamtpang/plus/main/cli/install.sh | sh
@@ -37,6 +29,22 @@ Windows (PowerShell):
 
 ```powershell
 irm https://raw.githubusercontent.com/adamtpang/plus/main/cli/install.ps1 | iex
+```
+
+The installer downloads two files, `cli/plus.mjs` and `cli/wallet.mjs`, plus a two-line launcher. Read them first if you like; that is all it installs.
+
+From a checkout instead:
+
+```bash
+npm link
+```
+
+Then:
+
+```bash
+plus login        # or: plus signup
+plus doctor
+plus ask "hello"
 ```
 
 ## Commands

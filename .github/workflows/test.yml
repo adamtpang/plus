@@ -10,9 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Mac is left out while the repo is private: private Mac minutes are
-        # billed at ten times the Linux rate. Add macos-latest when public.
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         node: [18, 22]
     runs-on: ${{ matrix.os }}
     steps:
