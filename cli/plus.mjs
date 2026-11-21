@@ -89,9 +89,20 @@ export function surplusEnv(key, base = BASE) {
 // to put in front of the user's own, and the environment to add. Returns
 // null for a tool we have no recipe for (`run` still works for those).
 // `models` is only needed by opencode, which must be told which models exist.
-export function launcher(tool, key, base = BASE, models = []) {
+// `model` is the one given with --model, or null to keep the tool's default.
+export function launcher(tool, key, base = BASE, models = [], model = null) {
   const env = surplusEnv(key, base);
-  if (tool === "claude" || tool === "aider") return { program: tool, args: [], env };
+  if (tool === "claude") {
+    // Claude Code uses a smaller model for background tasks; point those at
+    // the chosen one too, so every request uses a model Surplus serves.
+    const picked = model
+      ? Object.fromEntries(
+          ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"].map((k) => [k, model]),
+        )
+      : {};
+    return { program: "claude", args: [], env: { ...env, ...picked } };
+  }
+  if (tool === "aider") return { program: "aider", args: model ? ["--model", `openai/${model}`] : [], env };
   if (tool === "codex") {
     // Codex is told about Surplus through its own -c settings, so this works
     // whether or not you are signed in to Codex with another account.
@@ -102,7 +113,8 @@ export function launcher(tool, key, base = BASE, models = []) {
       "model_providers.surplus.env_key=SURPLUS_API_KEY",
       "model_providers.surplus.wire_api=responses",
     ];
-    return { program: "codex", args: settings.flatMap((s) => ["-c", s]), env: { ...env, SURPLUS_API_KEY: key } };
+    const args = [...settings.flatMap((s) => ["-c", s]), ...(model ? ["-m", model] : [])];
+    return { program: "codex", args, env: { ...env, SURPLUS_API_KEY: key } };
   }
   if (tool === "opencode") {
     const config = {
@@ -115,11 +127,27 @@ export function launcher(tool, key, base = BASE, models = []) {
         },
       },
     };
-    return { program: "opencode", args: [], env: { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } };
+    const args = model ? ["--model", `surplus/${model}`] : [];
+    return { program: "opencode", args, env: { ...env, OPENCODE_CONFIG_CONTENT: JSON.stringify(config) } };
   }
   return null;
 }
 const LAUNCHERS = ["claude", "codex", "aider", "opencode"];
+
+// How to install each launcher's tool, for when it is missing.
+const INSTALL_HINTS = {
+  claude: "npm install -g @anthropic-ai/claude-code",
+  codex: "npm install -g @openai/codex",
+  opencode: "npm install -g opencode-ai",
+  aider: "python -m pip install aider-install && aider-install",
+};
+
+// `plus claude --model x ...`: the model is ours only when it comes first.
+// Anywhere later it belongs to the tool and is passed through untouched.
+export function splitModelFlag(args) {
+  if ((args[0] === "--model" || args[0] === "-m") && args[1]) return { model: args[1], rest: args.slice(2) };
+  return { model: null, rest: args };
+}
 
 // ---- key handling ----
 
@@ -612,12 +640,29 @@ async function doctor() {
 // Start another program with its settings pointed at Surplus. Everything
 // after the program's name is passed through untouched. A known tool gets
 // its own recipe from launcher(); anything else gets the general settings.
-async function run(program, userArgs) {
+async function run(program, givenArgs) {
   if (!program) fail(`Usage: ${NAME} run <program> [its arguments]`);
   const key = apiKey();
+
+  // Check the key first: a tool that starts with a refused key fails later,
+  // in its own words, which are harder to read.
+  const check = await fetch(`${BASE}/v1/payments/balance`, {
+    headers: { authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(15_000),
+  }).catch(() => null);
+  if (!check) fail(`could not reach Surplus at ${BASE}. Check your connection and try again.`);
+  if (check.status === 401 || check.status === 403) {
+    fail(`Surplus refused your API key (status ${check.status}). Save a working one with: ${NAME} login`);
+  }
+  if (!onPath(program)) {
+    const hint = INSTALL_HINTS[program] ? ` Install it with: ${INSTALL_HINTS[program]}` : " Is it installed and on your PATH?";
+    fail(`${program} was not found.${hint}`);
+  }
+
+  const { model, rest: userArgs } = LAUNCHERS.includes(program) ? splitModelFlag(givenArgs) : { model: null, rest: givenArgs };
   // opencode has to be told which models exist, so ask Surplus for the list.
   const models = program === "opencode" ? ((await api("/v1/models", key)).data ?? []).map((m) => m.id) : [];
-  const recipe = launcher(program, key, BASE, models) ?? { program, args: [], env: surplusEnv(key) };
+  const recipe = launcher(program, key, BASE, models, model) ?? { program, args: [], env: surplusEnv(key) };
   const args = [...recipe.args, ...userArgs];
   const windows = process.platform === "win32";
   // On Windows the program may be a .cmd file, which needs a shell, and a
@@ -629,6 +674,26 @@ async function run(program, userArgs) {
     : spawn(program, args, options);
   child.on("error", (err) => {
     console.error(`${NAME}: could not start ${program}: ${err.message}`);
+    process.exit(1);
+  });
+  child.on("exit", (code) => process.exit(code ?? 1));
+}
+
+// Update by running the same installer again, into the folder plus runs from.
+const INSTALLER = "https://raw.githubusercontent.com/adamtpang/plus/main/cli";
+function update(flags) {
+  const windows = process.platform === "win32";
+  const [program, args] = windows
+    ? ["powershell", ["-NoProfile", "-Command", `irm ${INSTALLER}/install.ps1 | iex`]]
+    : ["sh", ["-c", `curl -fsSL ${INSTALLER}/install.sh | sh`]];
+  if (flags.print) return console.log([program, ...args].join(" "));
+  // Running from a checkout of the repository: git, not the installer, updates it.
+  const here = realpathSync(process.argv[1]);
+  if (existsSync(join(here, "..", "..", "package.json"))) fail("This is a checkout of the repository. Update it with: git pull");
+  const env = { ...process.env, PLUS_INSTALL_DIR: join(here, ".."), PLUS_NO_MODIFY_PATH: "1" };
+  const child = spawn(program, args, { stdio: "inherit", env });
+  child.on("error", (err) => {
+    console.error(`${NAME}: could not run the installer: ${err.message}`);
     process.exit(1);
   });
   child.on("exit", (code) => process.exit(code ?? 1));
@@ -895,6 +960,7 @@ async function main() {
       fixture: { type: "string" },
       save: { type: "string" },
       runs: { type: "string" },
+      print: { type: "boolean" },
     },
   });
   const [command, ...rest] = positionals;
@@ -909,6 +975,7 @@ async function main() {
   if (command === "ask") return ask(rest.join(" "), values);
   if (command === "compare") return compare(rest.join(" "), values);
   if (command === "doctor") return doctor();
+  if (command === "update") return update(values);
   if (command === "bench") return bench(values);
   fail(`Unknown command "${command}".\n\n${HELP}`);
 }
