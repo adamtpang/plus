@@ -634,6 +634,212 @@ async function run(program, userArgs) {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
+// ---- bench: the same prompts through several routers ----
+
+// Short prompts with one right answer, so quality can be checked by a
+// pattern instead of by opinion. `sample` is a correct reply, used by tests.
+export const BENCH_PROMPTS = [
+  { id: "math", text: "What is 17 * 23? Reply with only the number.", expect: /\b391\b/, sample: "391" },
+  { id: "capital", text: "What is the capital of Australia? Reply with one word.", expect: /canberra/i, sample: "Canberra" },
+  { id: "reverse", text: "Write the word stream backwards. Reply with only that.", expect: /maerts/i, sample: "maerts" },
+];
+
+// The routers. Keys come only from the environment (Surplus also from the
+// saved login). `fee` is added to what a router reports: OpenRouter charges
+// 5.5% when credits are bought, not per request. `cost` reads the charge in
+// dollars from a reply's usage, or null when the router does not report it.
+function benchRouters() {
+  return [
+    {
+      name: "surplus",
+      base: `${BASE}/v1`,
+      key: process.env.SURPLUS_API_KEY || readConfig().apiKey,
+      fee: 0,
+      model: (m) => m,
+      cost: (u) => (u?.buyer_cost_micro != null ? dollars(u.buyer_cost_micro) : null),
+    },
+    {
+      name: "openrouter",
+      base: process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1",
+      key: process.env.OPENROUTER_API_KEY,
+      fee: 0.055,
+      extra: { usage: { include: true } }, // asks OpenRouter to report the charge
+      model: (m) => (m.includes("/") ? m : `${vendorOf(m)}/${m}`),
+      cost: (u) => (u?.cost != null ? Number(u.cost) : null),
+    },
+    {
+      name: "ramp",
+      base: process.env.RAMP_ROUTER_BASE_URL, // not confirmed publicly, so it must be given
+      key: process.env.RAMP_ROUTER_API_KEY,
+      fee: 0,
+      model: (m) => m,
+      cost: (u) => (u?.cost != null ? Number(u.cost) : null),
+    },
+  ];
+}
+
+// OpenRouter names models "vendor/model". A guess from the name's start.
+function vendorOf(model) {
+  const known = [["gpt", "openai"], ["o1", "openai"], ["o3", "openai"], ["claude", "anthropic"], ["gemini", "google"], ["deepseek", "deepseek"], ["glm", "z-ai"], ["kimi", "moonshotai"], ["qwen", "qwen"], ["llama", "meta-llama"], ["grok", "x-ai"], ["mistral", "mistralai"]];
+  return known.find(([start]) => model.startsWith(start))?.[1] ?? "openai";
+}
+
+const median = (values) => {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+};
+
+// One row per router and model, from the raw samples. Pure, so it is tested
+// directly, and fixture runs and live runs share it.
+export function benchSummary(samples) {
+  const fees = Object.fromEntries(benchRouters().map((r) => [r.name, r.fee]));
+  const groups = new Map();
+  for (const s of samples) {
+    const key = `${s.router} ${s.model}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  return [...groups.values()].map((group) => {
+    const { router, model } = group[0];
+    const ok = group.filter((s) => s.ok);
+    const costs = ok.map((s) => s.costUsd);
+    const known = costs.length > 0 && costs.every((c) => c != null);
+    const costUsd = known ? costs.reduce((a, b) => a + b, 0) * (1 + (fees[router] ?? 0)) : null;
+    const tokens = ok.reduce((a, s) => a + (s.inTokens ?? 0) + (s.outTokens ?? 0), 0);
+    return {
+      router,
+      model,
+      attempts: group.length,
+      errorRate: (group.length - ok.length) / group.length,
+      quality: ok.length ? ok.filter((s) => s.pass).length / ok.length : null,
+      ttftMs: median(ok.map((s) => s.ttftMs)),
+      tokensPerSecond: median(ok.map((s) => (s.totalMs > s.ttftMs ? s.outTokens / ((s.totalMs - s.ttftMs) / 1000) : NaN))),
+      costUsd,
+      perMillionTokensUsd: costUsd != null && tokens > 0 ? (costUsd / tokens) * 1e6 : null,
+    };
+  });
+}
+
+// One streamed request, measured. Never throws: a failure is a sample too.
+async function benchOne(router, model, prompt, waitMs) {
+  const sample = { router: router.name, model, prompt: prompt.id };
+  const started = performance.now();
+  let ttft = null;
+  let text = "";
+  let usage = null;
+  try {
+    const res = await fetch(`${router.base}/chat/completions`, {
+      method: "POST",
+      signal: AbortSignal.timeout(waitMs),
+      headers: { "content-type": "application/json", authorization: `Bearer ${router.key}` },
+      body: JSON.stringify({
+        model: router.model(model),
+        messages: [{ role: "user", content: prompt.text }],
+        stream: true,
+        stream_options: { include_usage: true },
+        ...router.extra,
+      }),
+    });
+    if (!res.ok) return { ...sample, ok: false, error: `answered ${res.status}` };
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let done = false;
+    for await (const chunk of res.body) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        const event = parseEvent(line);
+        if (event === "done") done = true;
+        if (!event || event === "done") continue;
+        const piece = event.choices?.[0]?.delta?.content;
+        if (piece) {
+          ttft ??= performance.now() - started;
+          text += piece;
+        }
+        if (event.usage) usage = event.usage;
+      }
+      if (done) break;
+    }
+    const totalMs = performance.now() - started;
+    if (!text) return { ...sample, ok: false, error: "no text" };
+    return {
+      ...sample,
+      ok: true,
+      pass: prompt.expect.test(text),
+      ttftMs: Math.round(ttft),
+      totalMs: Math.round(totalMs),
+      inTokens: usage?.prompt_tokens ?? null,
+      outTokens: usage?.completion_tokens ?? null,
+      costUsd: router.cost(usage),
+    };
+  } catch (err) {
+    return { ...sample, ok: false, error: err.name === "TimeoutError" ? `no answer in ${waitMs / 1000} s` : "connection failed" };
+  }
+}
+
+async function bench(flags) {
+  let samples;
+  let note = null;
+  const skipped = [];
+  if (flags.fixture) {
+    const data = JSON.parse(readFileSync(flags.fixture, "utf8"));
+    samples = data.samples ?? data;
+    note = data.note ?? `Replayed from ${flags.fixture}.`;
+  } else if (flags.live) {
+    const models = (flags.model ?? DEFAULT_MODEL).split(",").map((m) => m.trim()).filter(Boolean);
+    const runs = Math.max(1, Math.min(Number(flags.runs ?? 1) || 1, 5));
+    const waitMs = (Number(flags.wait ?? 60) || 60) * 1000;
+    const routers = benchRouters().filter((r) => {
+      if (r.key && r.base) return true;
+      skipped.push(r.name);
+      return false;
+    });
+    if (routers.length === 0) fail("No router has a key. Set SURPLUS_API_KEY, OPENROUTER_API_KEY, or RAMP_ROUTER_API_KEY with RAMP_ROUTER_BASE_URL.");
+    // Routers run side by side; within a router, one request at a time, so
+    // they do not slow each other down.
+    const perRouter = await Promise.all(
+      routers.map(async (router) => {
+        const out = [];
+        for (let i = 0; i < runs; i++)
+          for (const model of models) for (const prompt of BENCH_PROMPTS) out.push(await benchOne(router, model, prompt, waitMs));
+        return out;
+      }),
+    );
+    samples = perRouter.flat();
+    note = `Live run, ${new Date().toISOString()}. ${BENCH_PROMPTS.length} prompts x ${runs} run(s) per model per router.`;
+    if (flags.save) writeFileSync(flags.save, JSON.stringify({ note, samples }, null, 2));
+  } else {
+    fail(
+      `bench needs a source.\n  ${NAME} bench --fixture <file>      replay saved results: no keys, no network\n  ${NAME} bench --live [-m models]    send real requests to every router you have a key for (costs a little)`,
+    );
+  }
+
+  const rows = benchSummary(samples);
+  if (flags.json) return console.log(JSON.stringify(rows, null, 2));
+  const pct = (v) => (v == null ? "" : `${Math.round(v * 100)}%`);
+  const money = (v) => (v == null ? "not reported" : usd(v));
+  console.log(note + "\n");
+  console.log(
+    table([
+      ["ROUTER", "MODEL", "ERRORS", "QUALITY", "FIRST TOKEN", "TOKENS/S", "$ PER 1M TOKENS", "COST"],
+      ...rows.map((r) => [
+        r.router,
+        r.model,
+        `${pct(r.errorRate)} of ${r.attempts}`,
+        pct(r.quality),
+        r.ttftMs == null ? "" : `${(r.ttftMs / 1000).toFixed(1)} s`,
+        r.tokensPerSecond == null ? "" : Math.round(r.tokensPerSecond),
+        r.perMillionTokensUsd == null ? "" : usd(r.perMillionTokensUsd),
+        money(r.costUsd),
+      ]),
+    ]),
+  );
+  for (const name of skipped) console.log(`${name}: skipped, no key`);
+  console.log("\nCost includes OpenRouter's 5.5% credit fee. Quality is the share of answers matching the expected reply.");
+}
+
 // ---- entry point ----
 
 const HELP = `${NAME}: Surplus Intelligence from the terminal
@@ -682,6 +888,10 @@ async function main() {
       "no-open": { type: "boolean" },
       stdin: { type: "boolean" },
       json: { type: "boolean" },
+      live: { type: "boolean" },
+      fixture: { type: "string" },
+      save: { type: "string" },
+      runs: { type: "string" },
     },
   });
   const [command, ...rest] = positionals;
@@ -696,6 +906,7 @@ async function main() {
   if (command === "ask") return ask(rest.join(" "), values);
   if (command === "compare") return compare(rest.join(" "), values);
   if (command === "doctor") return doctor();
+  if (command === "bench") return bench(values);
   fail(`Unknown command "${command}".\n\n${HELP}`);
 }
 
