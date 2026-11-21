@@ -144,14 +144,16 @@ function apiKey() {
 // Giving a body makes it a POST. Surplus requires an Idempotency-Key on
 // writes that create things or move money: if the same request is sent
 // twice by accident, the second one is recognised and not repeated.
-async function api(path, key = apiKey(), body) {
+// timeoutMs gives up on a call that never answers.
+async function api(path, key = apiKey(), body, timeoutMs) {
   const headers = key ? { authorization: `Bearer ${key}` } : {};
   const post = body && {
     method: "POST",
     headers: { ...headers, "content-type": "application/json", "idempotency-key": randomUUID() },
     body: JSON.stringify(body),
   };
-  const res = await fetch(BASE + path, post || { headers });
+  const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+  const res = await fetch(BASE + path, { ...(post || { headers }), signal });
   if (!res.ok) fail(`${path} answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
 }
@@ -407,28 +409,39 @@ async function ask(prompt, flags) { // prompt may gain piped text below
 
   // The watchdog. Waiting on a silent connection runs no code at all, so
   // nothing in the loop below can notice the silence. A timer can: it is
-  // pushed back every time data arrives, and if it ever fires it aborts the
-  // request, which makes the waiting fetch or read throw.
+  // pushed back every time the model sends something, and if it ever fires it
+  // aborts the request, which makes the waiting fetch or read throw.
+  // Keep-alive comments do not push it back: they prove the line is open,
+  // not that an answer is coming.
   const waitSeconds = Number(flags.wait ?? 90) || 90;
   const request = new AbortController();
   let watchdog;
-  const arm = () => {
+  const arm = (ms = waitSeconds * 1000, reason = "silence") => {
     clearTimeout(watchdog);
-    watchdog = setTimeout(() => request.abort(), waitSeconds * 1000);
+    watchdog = setTimeout(() => request.abort(reason), ms);
   };
+  let gotResponse = false;
 
+  // Returns true once the answer is complete and reading can stop.
   const handle = (line) => {
     const event = parseEvent(line);
-    if (!event) return;
+    if (!event) return false; // a blank line or a ": keep-alive" comment
     if (event === "done") return (finished = true);
+    if (!finished) arm(); // once finished, the short grace timer below stays in charge
     if (event.error) fail(`error inside the stream: ${JSON.stringify(event.error).slice(0, 200)}`);
     const choice = event.choices?.[0];
     if (choice?.delta?.content) {
       firstToken ??= performance.now();
       process.stdout.write(choice.delta.content);
     }
-    if (choice?.finish_reason) finished = true;
     if (event.usage) usage = event.usage;
+    if (choice?.finish_reason) {
+      // Finished. The cost usually follows in one more event, so allow a
+      // moment for it, then stop even if the server leaves the line open.
+      finished = true;
+      arm(Math.min(2000, waitSeconds * 1000), "finished");
+    }
+    return false;
   };
 
   try {
@@ -446,25 +459,33 @@ async function ask(prompt, flags) { // prompt may gain piped text below
     });
     if (!res.ok) fail(`chat answered ${res.status}: ${(await res.text()).slice(0, 300)}`);
     requestId = res.headers.get("x-request-id");
+    gotResponse = true;
 
     // Read the stream line by line and print text as it arrives. A chunk can
     // end in the middle of a line, so the unfinished part waits in `buffer`.
     const decoder = new TextDecoder();
     let buffer = "";
+    let complete = false;
     for await (const chunk of res.body) {
-      arm();
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop();
-      lines.forEach(handle);
+      for (const line of lines) if (handle(line)) complete = true;
+      if (complete) break; // [DONE]: stop now, even if the server keeps the line open
     }
-    handle(buffer + decoder.decode()); // a last line with no line break after it
+    if (!complete) handle(buffer + decoder.decode()); // a last line with no line break after it
   } catch (err) {
-    if (!request.signal.aborted) throw err;
-    if (firstToken) console.log();
-    fail(`no data for ${waitSeconds} s, so the request was dropped. Wait longer with --wait <seconds>.`);
+    if (request.signal.reason !== "finished") {
+      if (firstToken) console.log(); // end the partial answer's line first
+      if (request.signal.reason === "silence") {
+        fail(`no data for ${waitSeconds} s, so the request was dropped. Wait longer with --wait <seconds>.`);
+      }
+      if (gotResponse) fail("the connection was dropped before the answer finished.");
+      throw err;
+    }
   } finally {
     clearTimeout(watchdog); // a timer left running would keep the program alive
+    request.abort("finished"); // close the connection if the server left it open
   }
   if (!finished) {
     console.log();
@@ -474,8 +495,9 @@ async function ask(prompt, flags) { // prompt may gain piped text below
 
   // The receipt: what it cost against the list price for the same tokens.
   const paid = dollars(usage?.buyer_cost_micro);
+  // The list price and seller name are nice-to-haves: give up after 3 s rather than hang.
   const [info, seller] = await Promise.all([
-    api(`/v1/models/${encodeURIComponent(model)}`).catch(() => null),
+    api(`/v1/models/${encodeURIComponent(model)}`, undefined, undefined, 3000).catch(() => null),
     sellerOf(requestId),
   ]);
   const list = listPrice(info?.pricing, usage);
@@ -496,7 +518,7 @@ async function ask(prompt, flags) { // prompt may gain piped text below
 // can lag, and a missing name must never break the receipt.
 async function sellerOf(requestId) {
   if (!requestId) return null;
-  const log = await api("/v1/requests?limit=5").catch(() => null);
+  const log = await api("/v1/requests?limit=5", undefined, undefined, 3000).catch(() => null);
   return log?.items?.find((r) => r.request_id === requestId)?.provider ?? null;
 }
 
