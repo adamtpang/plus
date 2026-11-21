@@ -65,6 +65,31 @@ plus ask "hello"
 
 `plus ask` gives up after 90 seconds of silence (`--wait` changes it) and says so when an answer is cut off, instead of hanging.
 
+## Compare routers
+
+`plus bench` sends the same three short prompts, each with one right answer, through Surplus, OpenRouter and Router by Ramp, and reports for each router and model:
+
+- **price actually charged**, as each router reports it, plus OpenRouter's 5.5% credit fee
+- **time to first token** and **tokens per second** (medians)
+- **error rate**
+- **quality**: the share of answers that match the expected reply
+
+```bash
+plus bench --fixture cli/bench-fixture.json          # example data: no keys, no network
+plus bench --live -m gpt-4o-mini,deepseek-v4-flash   # real requests, costs a fraction of a cent
+plus bench --live --save run.json                    # keep a run, replay it later with --fixture
+```
+
+`--live` uses every router you have a key for and skips the rest:
+
+| Router | Settings |
+|---|---|
+| Surplus | `SURPLUS_API_KEY`, or your `plus login` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| Router by Ramp | `RAMP_ROUTER_API_KEY` and `RAMP_ROUTER_BASE_URL` (its address is not assumed) |
+
+Keys are never printed or saved. Three prompts are a quick reading, not a benchmark: use `--runs 3` for more samples. OpenRouter model names get a vendor prefix guessed from the name (`gpt-4o-mini` becomes `openai/gpt-4o-mini`).
+
 ## How sign-up works
 
 A Surplus account is a wallet. `plus signup` makes a new private key on your machine, signs Surplus's sign-in message with it, and swaps the signature for an API key. The signing code is in `cli/wallet.mjs`, written without dependencies and checked against published test values.

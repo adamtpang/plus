@@ -857,6 +857,9 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} price <model>                cheapest live sellers against list price
   ${NAME} logs [-n 10]                 your recent requests
   ${NAME} doctor                       check your setup, one thing at a time
+  ${NAME} bench --live [-m a,b]        Surplus, OpenRouter and Ramp, same prompts, side by side
+                                      (--fixture <file>: replay saved results, no keys or network)
+                                      (--save <file>: keep a live run to replay later)
   ${NAME} claude [arguments]           Claude Code, running on Surplus
   ${NAME} codex [arguments]            Codex, running on Surplus
   ${NAME} aider [arguments]            aider, running on Surplus
