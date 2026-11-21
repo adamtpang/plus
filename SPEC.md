@@ -1,6 +1,6 @@
 # plus: build spec
 
-Status: spec only. Written Nov 20, 2026 (CT), updated the same evening for Ramp Router, against `main` at `50a9639`. Public sources were read the same evening; every claim about Surplus, OpenRouter or Ramp's Router links to its source in the Sources section. Anything not confirmed from a public source is listed under Unknowns rather than guessed.
+Status: Locked, 20 November 2026 (CT). Locked against PR #1 head `fdf9963` (which was written against `main` at `50a9639`, then updated for Ramp's Router at router.com). Adam's answers of the same date are applied in section 10. Public sources were re-checked that evening for model ids and first-party list prices; every claim about Surplus, OpenRouter or Ramp's Router links to its source in the Sources section. Anything still not confirmed from a public source is listed under Unknowns rather than guessed.
 
 This document is for the coding session that builds plus. Read "Rules for Claude" before starting.
 
@@ -38,7 +38,7 @@ Known gaps this spec closes:
 3. `listPrice()` ignores cache read and cache write tokens, though `/v1/models` publishes `input_cache_read` and `input_cache_write` prices (checked live on `GET https://api.surplusintelligence.ai/v1/models`, Nov 20, 2026).
 4. `plus claude` does not pin `ANTHROPIC_SMALL_FAST_MODEL`. Surplus's Claude Code guide says to pin both slots if you pin one ([Claude Code setup](https://www.surplusintelligence.ai/docs/guides/claude-code-setup)).
 5. Only Surplus is supported. No OpenRouter or Ramp Router backend, so no head-to-head test is possible.
-6. Keys are stored as plain text in `~/.plus/config.json` (stated in `SECURITY.md`).
+6. Keys are stored as plain text in `~/.plus/config.json` (stated in `SECURITY.md`, and written by today's `plus login` and `plus signup`). This conflicts with the locked rule that Surplus keys come from environment variables only. Section 5 specifies the migration.
 7. Some field names the code reads from Surplus (`direct_cost_micro`, `upstream_ttfb_ms`, `provider` on request log rows, `savings_pct`) do not appear in Surplus's public docs. See Unknowns.
 
 ## 3. Facts from Surplus's public docs that the design depends on
@@ -104,30 +104,35 @@ Existing commands keep their names and behaviour unless a step below changes the
 | `plus ask "q" [-m model] [--via surplus\|openrouter\|ramp]` | `--via` picks the backend; default `surplus`. `ramp` is Ramp's Router. Receipt format from section 7. |
 | `plus receipt [request-id\|--last\|--session <id>]` | Reprints a receipt for one request or one wrapped session, from local records plus the provider's log. |
 | `plus receipts [--follow] [-n 20] [--json]` | Lists recent receipts from `~/.plus/receipts.jsonl`. `--follow` tails it, so Adam can watch costs in a second terminal while Claude Code runs. |
-| `plus listprice refresh` | Fetches list prices from the configured list price source (section 7) and caches them with the fetch date. |
-| `plus bench plan <suite>` | Prints the run matrix and an estimated maximum cost per provider. Makes no paid calls. |
-| `plus bench run <suite> [--providers surplus,openrouter,ramp] [--runs 5] [--budget <dollars>]` | Runs the head-to-head test (section 8). Refuses to start without `--budget` and a typed confirmation, and stops when the budget is reached. |
+| `plus login [--key]` | Checks a Surplus `inf_` key against `GET /v1/payments/balance`, then prints an `export SURPLUS_API_KEY=...` line (and a one-line note to add it to the shell profile). Does not write the key to disk. See section 5. |
+| `plus signup` | May still exist for Surplus, but it must not write an API key to `config.json`; print the same export line. plus never signs up for OpenRouter or Ramp Router, and never signs up as part of a bench. |
+| `plus listprice refresh` | Optional. Fetches Surplus `GET /v1/prices` only when the user passes an explicit flag (off by default). Does not overwrite the frozen first-party list prices in the repo (section 7). |
+| `plus bench plan [suite]` | Prints the run matrix, the model-id map, which providers will run or be skipped, and an estimated maximum cost against the $10 hard cap. Default suite is `default`. Makes no paid calls. |
+| `plus bench run [suite] [--providers surplus,openrouter,ramp] [--budget <dollars>] [--dry-run]` | Runs the head-to-head test (section 8). Default budget is the $10 hard cap; `--budget` may only lower it. Live runs need a typed confirmation. `--dry-run` (and the fixture path used in tests) spends nothing and makes no live calls. If `RAMP_ROUTER_API_KEY` is missing, Ramp Router is skipped with a clear message and the run continues on the other providers. |
 | `plus bench report <run-id> [--json\|--md]` | Summarises a finished run. |
-| `plus doctor` | Also checks each configured backend's key (without printing it), the list price cache age, and that `~/.plus` is not inside a git repo. |
+| `plus doctor` | Also checks each backend key from the environment (without printing it), warns if `~/.plus/config.json` still contains a key field, checks the list price file date, and checks that `~/.plus` is not inside a git repo. |
 
 All commands that print money take `--json`. All exit non-zero on failure.
 
 ## 5. Config
 
 - Directory: `~/.plus/` (override with `PLUS_HOME`). Files:
-  - `config.json`: non-secret settings (default model per backend, small/fast model, list price source, receipt options) and, as today, the Surplus key if saved with `login`.
+  - `config.json`: non-secret settings only (default model per backend, small/fast model, receipt options). It must never contain an API key.
   - `receipts.jsonl`: one JSON line per answer or session. No prompt or answer text, only the receipt fields.
-  - `listprices.json`: cached list prices with source URL and fetch date.
+  - `bench/ledger.json` (or equivalent): running paid-spend ledger for the $10 hard cap, across all paid bench runs. No keys, no prompt text.
   - `bench/<run-id>/`: raw results of each bench run.
-- Environment variables (always win over the file):
+- Frozen list prices live in the repo, not only under `~/.plus/`: a committed `listprices.json` (or `bench/listprices.json`) with first-party prices, source URL, and fetch date (section 7). A user-level cache may exist for the optional Surplus `/v1/prices` refresh; it must not replace the frozen first-party entries unless the user asks.
+- Environment variables (the only source of keys):
   - `SURPLUS_API_KEY`, `SURPLUS_BASE_URL` (existing).
   - `OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`, from [OpenRouter Codex CLI guide](https://openrouter.ai/docs/cookbook/coding-agents/codex-cli.md)).
-  - Ramp Router: `RAMP_ROUTER_API_KEY` (the name Router's own docs use) and `RAMP_ROUTER_BASE_URL` (default `https://api.router.com/v1`, from [Endpoint](https://docs.router.com/api/endpoint)).
+  - Ramp Router: `RAMP_ROUTER_API_KEY` (the name Router's own docs use) and `RAMP_ROUTER_BASE_URL` (default `https://api.router.com/v1`, from [Endpoint](https://docs.router.com/api/endpoint)). If `RAMP_ROUTER_API_KEY` is unset, Ramp Router features and bench cells are skipped; plus does not prompt to sign up.
   - `PLUS_HOME`.
-- Keys:
-  - Recommended path is environment variables. `login` may still save the Surplus key to `config.json` with mode 600 as today.
-  - Never write OpenRouter or Ramp Router keys to disk from plus; env only. plus never edits `~/.claude/settings.json` or `~/.codex/config.toml`; it sets settings for the child process only (env and Codex `-c`), so Adam's normal setup is untouched. (Decision for Adam: whether to add OS keychain storage later. On Linux it may need a tool that is not installed by default, so it is not in scope without his OK.)
-  - Keys are never printed, never written to `receipts.jsonl` or bench output, and never passed on a command line (they would show in process lists). Child processes get them through the environment only. Note: the existing Codex launcher puts no key on the command line (it uses `env_key`); keep it that way. The existing opencode launcher puts the key inside `OPENCODE_CONFIG_CONTENT`, which is an environment variable; acceptable, but do not log it.
+  - Optional: `PLUS_BENCH_CAP` (dollars, default `10`). May only lower the hard cap, not raise it.
+- Keys (locked, Nov 20, 2026): environment variables only. No `~/.plus/config.json` for keys.
+  - This conflicts with v0.2.0: `plus login` and `plus signup` currently write `apiKey` to `~/.plus/config.json` (mode 600), and commands fall back to `readConfig().apiKey` when `SURPLUS_API_KEY` is unset. `signup` may also write a wallet private key to that file; that path is not used by the bench, and this lock does not redesign wallet storage, but the Surplus API key itself must not be written or read there.
+  - Migration: `plus login` still checks the key against `GET /v1/payments/balance`, then prints `export SURPLUS_API_KEY=<key>` (and a one-line note to add it to the shell profile) and exits 0. It does not write the key to any file. `plus signup`, if kept, prints the same export line and does not write `apiKey`. Commands and `doctor` read Surplus keys only from `SURPLUS_API_KEY`. If `config.json` still has an `apiKey` field from an earlier version, ignore it, do not use it, and have `doctor` (and any command that notices the field) warn: move the key to `SURPLUS_API_KEY` and remove the field from the file. Do not delete the field automatically.
+  - Never write OpenRouter or Ramp Router keys to disk from plus; env only. plus never edits `~/.claude/settings.json` or `~/.codex/config.toml`; it sets settings for the child process only (env and Codex `-c`), so Adam's normal setup is untouched. OS keychain storage stays out of scope unless Adam later says yes. On Linux it may need a tool that is not installed by default.
+  - Keys are never printed in receipts, logs, help, errors, `receipts.jsonl` or bench output (the `login` export line is the one deliberate exception, written only to stdout for the user to copy). Keys are never passed on a command line (they would show in process lists). Child processes get them through the environment only. Note: the existing Codex launcher puts no key on the command line (it uses `env_key`); keep it that way. The existing opencode launcher puts the key inside `OPENCODE_CONFIG_CONTENT`, which is an environment variable; acceptable, but do not log it.
   - `.gitignore` already covers `.env` and `.env.*`. Add a test that fails if any committed file matches an `inf_` or `sk-or-` key pattern (Router's key format is not documented publicly, see Unknowns).
 
 ## 6. Wrapping Claude Code and Codex
@@ -183,10 +188,13 @@ Fields and where each comes from:
 | first token, total | measured by plus on the client with `performance.now()` | Label as client-measured. |
 | request id | `x-request-id` (Surplus, Ramp Router, plus Router's `x-trace-id`); generation id (OpenRouter) | Always kept so the charge can be reconciled later. |
 
-List price source:
+List price source (locked, Nov 20, 2026):
 
-- Default: the first-party provider's published price for that model (for example Anthropic's or OpenAI's pricing page), entered in `listprices.json` with the URL and fetch date. Do not invent any figure; an entry without a URL and date is invalid and the receipt says "list price unknown".
-- Fallback, clearly labelled: Surplus `GET /v1/prices` entry for the first-party provider (for example `provider: "anthropic"`), with its `updated_at`. Label it "list via Surplus /v1/prices, <updated_at>".
+- Default: the model makers' own pricing pages, frozen in a committed `listprices.json` with the source URL and the fetch date. For this bench that is Anthropic for Claude and Moonshot (Kimi API platform) for Kimi. Do not invent any figure; an entry without a URL and date is invalid and the receipt says "list price unknown".
+- Frozen entries, read 20 November 2026 (CT):
+  - Claude Opus 5.5, from [Anthropic model pricing](https://platform.claude.com/docs/en/about-claude/pricing): input $4 / MTok, output $20 / MTok, 5-minute cache writes $5 / MTok, 1-hour cache writes $8 / MTok, cache hits and refreshes $0.20 / MTok.
+  - Kimi K3 (`kimi-k3`), from [Kimi / Moonshot model inference pricing](https://platform.kimi.ai/docs/pricing/chat): input $3.00 / MTok, output $15.00 / MTok, cached input $0.30 / MTok, 5-minute cache writes $3.00 / MTok, 1-hour cache writes $6.00 / MTok. (The pricing markdown table is empty in the static doc; these figures are the rows rendered on that page for `kimi-k3`.)
+- Surplus `GET /v1/prices` is optional and off by default. `plus listprice refresh` only runs it when explicitly requested. If used, label the figure "list via Surplus /v1/prices, <updated_at>" and do not silently replace the frozen first-party entry.
 - Fee adjustments, in bench reports only and always labelled:
   - OpenRouter: credit purchase fee, 5.5% with a $0.80 minimum ([OpenRouter FAQ](https://openrouter.ai/docs/faq.md)); no inference markup per the same page.
   - Ramp Router: no platform fee and free routing through Dec 31, 2026; from Jan 1, 2027 listed model price with no token markup and a 2% fee on own-key traffic ([router.com/faq](https://router.com/faq)). The report shows Router cost two ways: as measured (during the free period) and with the documented 2027 terms applied, labelled as a projection. The $500 starter credit is a promotion and is never counted as a saving. If Router serves a provider at its US processing premium ([FAQ](https://docs.router.com/resources/faq)), that is part of the measured cost and is noted.
@@ -194,31 +202,72 @@ List price source:
 
 ## 8. Head-to-head test plan
 
-Goal: answer "does Surplus actually save money without costing quality, speed or reliability?" against OpenRouter and Ramp's Router (router.com). Exactly these three providers are tested.
+Goal: answer "does Surplus actually save money without costing quality, speed or reliability?" against OpenRouter and Ramp's Router (router.com). These are the three providers. Ramp Router is optional until Adam has a key (section 10).
 
-Fairness rules:
+### Models (locked, Nov 20, 2026)
+
+Two models, both listed on all three public catalogs on 20 November 2026 (CT):
+
+| Bench name | Surplus id (`GET https://api.surplusintelligence.ai/v1/models`) | OpenRouter id (`GET https://openrouter.ai/api/v1/models`) | Ramp Router documented id ([supported models](https://docs.router.com/supported-models.md); [choose a model](https://docs.router.com/guides/choose-a-model.md)) |
+|---|---|---|---|
+| Kimi K3 (open-weight) | `kimi-k3` | `moonshotai/kimi-k3` | `kimi-k3` |
+| Claude Opus 5.5 (current Claude frontier) | `claude-opus-5.5` | `anthropic/claude-opus-5.5` | `claude-opus-5-5` |
+
+Claude Opus 5.5 is the current generally available Claude frontier model on Anthropic's pricing page (input $4 / MTok, output $20 / MTok). All three catalogs also list Claude Sonnet 5.5, Claude Fable 5.2, and other Claude ids; those are not the locked bench models. Do not silently substitute `kimi-k3-fast-api`, `kimi-k3.1-pro`, `:batch` ids, or a Fast / flex tier.
+
+Ramp Router note: the supported-models page says display labels are not necessarily valid request ids, and that `GET /v1/models` is authoritative for the caller's key. Unauthenticated `GET https://api.router.com/v1/models` returned 401, so the Router column above is the documented public id, not a live per-key confirmation. When `RAMP_ROUTER_API_KEY` is present, `plus bench plan` must confirm the callable id from that key's catalog and record it. If that catalog lacks Kimi K3 or Claude Opus 5.5, skip the missing model on Router with a clear message; do not pick a stand-in.
+
+Store the map in `bench/models.json`. At plan time, re-check Surplus and OpenRouter public lists (and Router when a key is present) and record each provider's id string on every raw row.
+
+### Budget (locked, Nov 20, 2026)
+
+Hard cap: $10.00 total across all paid bench runs, not just one invocation.
+
+- Default `--budget` is `10`. The flag may only lower the cap. Raising it needs a later yes from Adam. `PLUS_BENCH_CAP` follows the same rule.
+- Keep a running ledger of actual paid spend (including failed requests and capped retries) under `~/.plus/bench/ledger.json`. `plus bench plan` and `plus bench run` print spent-so-far, remaining, and the estimated maximum for this run.
+- Before every paid call, estimate the cost of that call at the frozen Claude Opus 5.5 list price (the expensive model) using the prompt's estimated input tokens and `max_tokens` for output. If that estimate would push the ledger over the remaining cap, refuse the call, do not send it, and stop cleanly with a message that names the cap and the remaining budget. Do not hide the refusal as a quality zero.
+- `--dry-run` and the fixture path used in tests spend nothing, need no live keys, and make no network calls to the three products. `plus bench plan` also makes no paid calls (public model-list fetches, if any, are not billed inference).
+- Live `plus bench run` still requires a typed confirmation. Dry-run and fixtures do not.
+
+### Default run size and math
+
+The default suite is `default` (committed under `bench/suites/`). It is sized so a full 3-product x 2-model run fits well under $10 even if every request is billed at Claude Opus 5.5 list prices (a conservative overestimate, because Kimi K3 list is cheaper). Prompts are public material only, no secrets, no private or sensitive text (see section 8a).
+
+Default matrix:
+
+- 8 single-turn prompts: 3 short checkable answers, 2 small coding tasks with local unit tests, 1 single-turn tool-use (valid JSON tool calls, not a Claude Code session), 1 strict format / schema, 1 short refactor.
+- 2 cold runs (unique nonce at the start of the system prompt) plus 1 warm-cache pass of the same prompts: 3 passes.
+- 3 products x 2 models, when all keys are present.
+- `max_tokens = 1024`. Temperature 0, or the lowest the model accepts. Streaming on.
+- Each frozen prompt must be at most 2,000 input tokens at plan time (including the nonce and any tool schema). If a prompt is over that, `bench plan` and `bench run` refuse until it is cut, so the math stays honest.
+
+Request count when all three products run: 3 x 2 x 8 x 3 = 144.
+
+Worst-case estimated cost, every request at Claude Opus 5.5 list, input at the 2,000-token ceiling, output at `max_tokens` 1,024, no cache discount on the estimate (the warm pass may be cheaper in reality; the estimate must not rely on that):
+
+- Per request: (2,000 x $4 + 1,024 x $20) / 1,000,000 = $0.008 + $0.02048 = $0.02648
+- 144 requests: 144 x $0.02648 = $3.81312
+
+OpenRouter's credit-purchase fee (5.5%, $0.80 minimum, [OpenRouter FAQ](https://openrouter.ai/docs/faq.md)) is labelled in the report. plus does not buy credits. If that fee is applied only to the OpenRouter third (48 requests, $1.27104 at this estimate), 5.5% is $0.07. The $0.80 minimum would matter only if Adam had to buy a new credit bundle, which plus must not do. Ramp Router routing is free through 31 December 2026 per the public FAQ; the documented 2% own-key fee from 1 January 2027 is a labelled projection in the report and is not counted against the $10 cap. Surplus card/USDC funding fees are also labelled and are not incurred by the bench itself.
+
+Planned maximum charged under current public terms: about $3.81, well under $10, with about $6.19 of headroom. If Ramp Router is skipped: 2 x 2 x 8 x 3 = 96 requests, about $2.54.
+
+The larger suites sketched earlier (20 short + 10 code + 3 agent tasks, 5 runs in 3 time windows, 15 passes per cell) cannot fit under the $10 cap. At the same Claude list and token ceilings, 30 API prompts x 15 passes x 3 products x 2 models = 2,700 requests, about $71.50, and a Claude Code `agent` suite is unbounded. Those suites stay out of the default run. They may be added later only if Adam raises the cap. `plus bench plan` on such a suite must say it exceeds the cap and refuse to start a live run.
+
+### Fairness rules
 
 - Same machine, same network, same time window, interleaved: for each run, the order of providers is shuffled, so no provider always goes first.
-- Same model on every provider where all three carry it. The model map (`bench/models.json`) is filled by checking each provider's model list at plan time; a model is only "same" if all three list it. Record each provider's model id string.
+- Same model on every provider that actually runs it, using the id map above. A model is only compared across the providers that list it and that have a key.
 - Same request: same messages, `max_tokens`, temperature 0 (or the lowest the model accepts), streaming on, same tools if any.
-- Caching: run every prompt cold by adding a unique run nonce at the start of the system prompt, and report a separate warm-cache pass, since cache prices and cache routing differ by provider.
-- Same wire: the `short` and `code` suites use the OpenAI Responses API on all three, because Ramp Router returns `usage.cost` only on Responses and recommends it, and Surplus and OpenRouter both serve Responses ([Surplus Responses](https://www.surplusintelligence.ai/docs/api-reference/responses), [OpenRouter usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting.md)). Note that Surplus may bridge Responses to a chat-only seller; record it when reported.
+- Caching: cold runs use a unique nonce; the warm-cache pass is reported separately, since cache prices and cache routing differ by provider.
+- Same wire: the default suite uses the OpenAI Responses API on all three, because Ramp Router returns `usage.cost` only on Responses and recommends it, and Surplus and OpenRouter both serve Responses ([Surplus Responses](https://www.surplusintelligence.ai/docs/api-reference/responses), [OpenRouter usage accounting](https://openrouter.ai/docs/cookbook/administration/usage-accounting.md)). Note that Surplus may bridge Responses to a chat-only seller; record it when reported.
 - Same model, no substitution: on Ramp Router send `allow_flex_tier: false` and no fallback `models` list, and drop any answer whose served `model` differs from the requested one from the same-model comparison (count it under reliability). Surplus at default routing; OpenRouter at default provider routing.
-- Second, labelled variant ("each at its best"): Surplus with `/min30`, Ramp Router with its defaults (cost-efficient routing on), OpenRouter default. Reported separately from the same-model table.
-- The `agent` suite through Claude Code uses a Claude model on all three, since Router serves Claude Code with Claude models only. Its cost comes from each provider's records, not inline (Router's Messages responses carry no `usage.cost`).
+- Second, labelled variant ("each at its best") is not part of the default $10 run (it would add requests). It may be added later under the same cap only if the plan still fits, otherwise it waits.
 - Record what actually served the request (Surplus served provider; OpenRouter provider; Ramp Router `X-Router-Provider` and served `model`). Note: Surplus lists `openrouter` among its providers ([Price comparison](https://www.surplusintelligence.ai/docs/api-reference/prices)), so some Surplus requests may be served through OpenRouter; report that share.
 
-Suites (committed under `bench/suites/`, written by Adam or by the session from public material, no private data, no secrets):
+### Provider skip
 
-1. `short`: 20 single-turn prompts with checkable answers (exact match, number, JSON schema, regex).
-2. `code`: 10 small coding tasks, each with unit tests run locally on the answer.
-3. `agent`: 3 tasks on a small fixture repo, run through Claude Code in print mode and Codex in its non-interactive mode on each of the three backends, scored by the fixture's tests passing. (Confirm the exact non-interactive flags against the installed versions; do not assume.)
-
-Runs and size:
-
-- 5 runs per prompt per provider per model, in 3 separate time windows on different days (for example morning, evening, late night CT), because marketplace supply changes over time. That is 15 runs per cell.
-- Models: start with 2, one frontier and one cheap, picked by Adam from those all three carry.
-- `plus bench plan` prints the total request count and the estimated maximum cost (at list price, using `max_tokens`) before anything is spent. Adam approves the budget.
+If `OPENROUTER_API_KEY` or `SURPLUS_API_KEY` is missing, `plus bench run` (live) exits 1 with a message naming the missing env var and does not start. Adam has those accounts. If `RAMP_ROUTER_API_KEY` is missing, print a clear message that Ramp Router is skipped because no key is set, and continue with Surplus and OpenRouter. plus never signs up for any product, never opens a signup page, and never prompts Adam to create a Router account.
 
 Metrics:
 
@@ -233,6 +282,21 @@ Metrics:
 
 Output: `bench report` writes a Markdown table per model (provider rows, the metrics above, number of runs, dates and times in CT) and the raw JSONL. Every number in the report traces to a raw row.
 
+## 8a. Terms for the bench
+
+This is not legal advice. It is a short rule list drawn from the public terms read on 20 November 2026. None of the three consumer or Router terms expressly forbids benchmarking or publishing comparison results by name. They do restrict scraping, building a competing service, red teaming, and (for Surplus and OpenRouter) multiple accounts.
+
+For any bench or live call:
+
+- Use each product's documented paid API only, inside published rate limits and the $10 spend cap. Do not scrape marketing pages, model catalogs, or dashboards.
+- Do not include jailbreak, prompt-injection, or other adversarial red-team prompts. Surplus and OpenRouter both require prior written approval for that kind of testing.
+- Use one legitimate account per service. plus never creates accounts. Surplus allows more than one account when reasonably necessary for legitimate use, but not to evade limits. OpenRouter forbids a single user creating multiple accounts "for purposes of bypassing or circumventing use limits on the Site or Service or for any other reason."
+- Stay on the documented API paths in this spec. Do not bypass rate, spend, or safety controls.
+- Ramp Router records prompt and response content for 1 year by default, and the user can opt out in [Router Settings](https://app.router.com/settings) ([Monitor and debug](https://docs.router.com/guides/monitor.md)). Adam does not have a Router account yet, so plus cannot change that setting. Bench prompts and fixtures must contain nothing sensitive: no secrets, no personal data, no private code, no customer material. plus does not automate signup or settings changes.
+- Publishing a report is not expressly forbidden in those three documents, and it is also not expressly allowed. Model-provider terms still apply and were not fully reviewed here. Do not treat this section as a license.
+
+Sources: [Surplus Terms](https://www.surplusintelligence.ai/terms-of-service) and [AUP](https://www.surplusintelligence.ai/acceptable-use-policy) (14 November 2026); [OpenRouter Terms](https://openrouter.ai/terms) (31 August 2026); [Ramp Router Terms](https://ramp.com/legal/developer-terms/developer-terms/router-terms-of-service) (31 August 2026). `https://www.surplusintelligence.ai/terms` and `https://router.com/terms` 404.
+
 ## 9. Build steps (in order) with acceptance criteria
 
 Each step is one PR. Tests first: write the test, watch it fail, then change the code (`CLAUDE.md`). Tests use pretend servers on localhost and never need a real key or spend money.
@@ -241,8 +305,8 @@ Each step is one PR. Tests first: write the test, watch it fail, then change the
    - Pull the receipt into one function that takes usage, cost, list price entry, timings and ids and returns the line and the JSON record.
    - Accept: unit tests for cache tokens priced at cache rates; unknown cost prints "cost unknown" and no saving; negative saving is shown; list price without URL and date gives "list price unknown"; no key or prompt text in the record.
 2. List prices
-   - `listprices.json`, `plus listprice refresh` from `GET /v1/prices` as the labelled fallback, and a hand-entered first-party entry format with URL and date.
-   - Accept: test with a pretend `/v1/prices`; receipt shows source and date; stale cache (older than 7 days) is flagged by `doctor`.
+   - Commit frozen first-party entries (Claude Opus 5.5 and Kimi K3, 20 November 2026, URLs and dates in section 7). `plus listprice refresh` is optional and off by default; when used it only labels Surplus `GET /v1/prices` and does not overwrite the frozen entries.
+   - Accept: receipt shows source and date from the frozen file; a test with a pretend `/v1/prices` only applies after an explicit refresh flag; an entry without URL and date prints "list price unknown".
 3. `receipts.jsonl` and `plus receipts` / `plus receipt`
    - Accept: `ask` appends one line per answer; `--follow` prints new lines; file contains no secrets (test scans it).
 4. Claude Code slots
@@ -252,30 +316,32 @@ Each step is one PR. Tests first: write the test, watch it fail, then change the
    - Accept: with a pretend server, `plus claude` and `plus codex` print a session summary after the child exits; when the request log read is refused, the message says cost could not be read and exits with the child's code.
 6. Backends (exactly three)
    - A small backend table with one adapter each: `surplus` (`/v1` and `/anthropic`), `openrouter` (`https://openrouter.ai/api/v1`, Claude Code at `https://openrouter.ai/api`), `ramp` (`https://api.router.com/v1`, Claude Code at `https://api.router.com`). Each adapter declares: base URLs, key env var, how to read paid cost, served model and served provider, and the Claude Code and Codex launch settings from section 6. `ask --via` and `claude`/`codex --via`.
-   - Accept: pretend servers for each; Surplus `buyer_cost_micro` (microdollars) mapped; OpenRouter `usage.cost` mapped; Ramp Router `usage.cost` (USD) mapped on Responses, and cost shown as unknown on Router Messages and Chat Completions; Router `X-Router-Provider` and served `model` captured; Router `401 api_key_deactivated` shown with Router's message and no retry loop (Router counts retried violations as strikes); keys read only from env for OpenRouter and Ramp Router; launcher tests check the exact child environment and that `ANTHROPIC_API_KEY` is absent for `ramp` and empty for the other two.
+   - Accept: pretend servers for each; Surplus `buyer_cost_micro` (microdollars) mapped; OpenRouter `usage.cost` mapped; Ramp Router `usage.cost` (USD) mapped on Responses, and cost shown as unknown on Router Messages and Chat Completions; Router `X-Router-Provider` and served `model` captured; Router `401 api_key_deactivated` shown with Router's message and no retry loop (Router counts retried violations as strikes); keys for all three backends, including Surplus, read only from the environment; a missing `RAMP_ROUTER_API_KEY` skips Ramp with a clear message; launcher tests check the exact child environment and that `ANTHROPIC_API_KEY` is absent for `ramp` and empty for the other two.
 7. Bench plan and run
-   - `bench plan`, `bench run` with `--budget`, typed confirmation, shuffled order, nonce for cold runs, budget stop.
-   - Accept: with pretend servers, the run stops at the budget; the matrix matches `--runs` and providers; raw JSONL written; no paid call happens in `plan`.
+   - `bench plan`, `bench run` with the $10 hard cap, a persistent ledger, estimate-before-call refusal, typed confirmation on live runs, shuffled order, nonce for cold runs, and `--dry-run` / fixture mode that spends nothing.
+   - Accept: with pretend servers, the default matrix is 144 requests when all three providers are present (8 prompts x 3 passes x 3 providers x 2 models), or 96 when Ramp is skipped; a fixture run with no keys and no network exits 0 and writes a table and JSONL; a missing Router key skips Ramp and still exits 0; the ledger refuses the next call when its Claude-list estimate would exceed the remaining cap, including a case where the cap is already spent; `--budget 11` (or any value above 10) is rejected; `plan` makes no paid call and prints the $3.81 worst-case math (or the live numbers from the frozen prices and the actual prompt token counts, which must be at or under $3.81 at the ceilings in section 8).
 8. Bench report
    - Accept: report built only from raw rows; p50/p90 and error rate computed in tests on fixed data; times in CT.
 9. Doctor and security checks
-   - Accept: doctor reports each backend key present or missing without printing it; a test fails if any tracked file contains a key pattern; doctor warns if `PLUS_HOME` is inside a git work tree.
-10. Docs
-   - README and SECURITY.md updated for the new commands, backends and stored files.
-   - Accept: no em dashes (test greps the repo); every limit stated honestly.
+   - Accept: doctor reports each backend key present or missing from the environment without printing it; it warns if `config.json` still contains a key field and does not use that field; a test fails if any tracked file contains a key pattern; doctor warns if `PLUS_HOME` is inside a git work tree.
+10. Docs, login migration, and terms
+   - README and SECURITY.md updated for env-only keys, the new commands, backends and stored files. `plus login --help` describes the export-line behaviour.
+   - Accept: no em dashes (test greps the repo); every limit stated honestly; `login` against a pretend balance endpoint prints an export line and leaves `config.json` without an `apiKey`.
 
-Later, only with Adam's yes: live receipts proxy (method B), OS keychain storage, the actual paid bench runs.
+Later, only with Adam's yes: live receipts proxy (method B), OS keychain storage, raising the $10 cap, and the larger non-default bench suites. The actual paid default run also waits for Adam's confirmation at run time, after the code is built and `plan` has printed the estimate.
 
-## 10. Open questions for Adam
+## 10. Decisions (Adam, 20 November 2026)
 
-1. ANSWERED (Adam, Nov 20, 2026): "router" is Ramp's Router at router.com. Verified against router.com and Ramp's pages, see section 3a.
-2. Which two models for the bench, and what spend budget for the paid runs?
-3. List price source: first-party pricing pages entered by hand (preferred), or Surplus `/v1/prices` as the default?
-4. OK to add an optional live receipts proxy (method B) later?
-5. Keep saving the Surplus key in `~/.plus/config.json`, or env only?
-6. Are OpenRouter and Ramp Router accounts already set up, with keys he can put in env? plus will not sign up for anything. Router accounts are business only: direct or Google signup needs a business email and domain (Gmail is refused); otherwise "Sign in with Ramp" or manual onboarding through router@ramp.com.
-7. Before any bench or real coding on Ramp Router, turn off Ramp-side content recording in Router Settings? It is on by default and kept for 1 year.
-8. Run the paid bench before Dec 31, 2026 (Router routing free) and report the 2027 terms as a projection, or wait?
+Every earlier open question is resolved. There is no open-question list left in this locked spec.
+
+1. "router" is Ramp's Router at router.com. Verified against router.com and Ramp's pages, see section 3a. (Already answered in `fdf9963`.)
+2. Models: Kimi K3 (open-weight) and Claude Opus 5.5 (current Claude frontier). Both are on all three public catalogs; ids and the Router per-key caveat are in section 8. Paid test budget: hard cap $10 total across all paid runs, enforced in code, with dry-run / fixture mode that spends nothing. Default run size and the $3.81 worst-case math are in section 8.
+3. List prices: default source is the model makers' own pricing pages (Moonshot / Kimi API platform for Kimi, Anthropic for Claude), frozen with a date in the repo. Surplus `/v1/prices` is optional and off by default.
+4. Optional live receipts proxy (method B) stays out of scope until Adam later says yes.
+5. Surplus key: environment variables only. No `~/.plus/config.json` for keys. This conflicts with v0.2.0 `login` / `signup`; the migration is in section 5 (`login` prints the export line and does not write the key).
+6. Adam has OpenRouter and Surplus accounts. He does not have router.com yet (needs a business email; Gmail was refused). Ramp Router is optional: the bench skips it cleanly, with a clear message, when `RAMP_ROUTER_API_KEY` is missing. plus never signs up for anything. Router self-serve signup still requires a business email and domain ([signup eligibility](https://docs.router.com/resources/signup-eligibility.md)).
+7. Do not block the bench on turning off Ramp content recording. Router stores prompts and outputs for 1 year by default ([Monitor and debug](https://docs.router.com/guides/monitor.md)). Adam can opt out in Settings once he has an account; plus does not change that setting. Bench prompts must contain nothing sensitive (section 8a).
+8. Do not wait for 1 January 2027. Run the default bench when Adam has keys and confirms the live plan. If a Router run happens on or before 31 December 2026, measured routing is free per the public FAQ; report the 2027 2% own-key fee as a labelled projection. If a run happens after that date, use the then-current public terms. The $10 cap applies to actual charges, not to projections.
 
 Considered, not in the test: before Adam's answer, these were listed as possible meanings of "router": Requesty, Not Diamond, OpenRouter's Auto Router and Auto Code, LiteLLM proxy, Portkey, Vercel AI Gateway, Cloudflare AI Gateway and RouteLLM. They are out of scope. OpenRouter's Auto routers and Ramp Router's own strategies (Switchyard, auto routing) are also not used in the same-model test.
 
@@ -286,19 +352,19 @@ Considered, not in the test: before Adam's answer, these were listed as possible
 - U3. Whether `x-si-list-cost-micro` appears on `/v1/chat/completions`, `/anthropic` and `/v1/responses` responses. It is documented on the Provider Market surface ([Your first call](https://www.surplusintelligence.ai/docs/marketplace/provider-market-calling)).
 - U4. How Surplus's reference ("list") price is resolved per model, beyond "`PROVIDER_PRICES` in the codebase" and "our own catalog figure" when no live competitor price exists. This is why the receipt uses an independent list price.
 - U5. Whether Codex's full feature set works on Surplus's Responses lane when a request is bridged to a chat-only seller (docs say hosted tools and opaque reasoning are dropped there).
-- U6. Whether Surplus's terms say anything about publishing benchmark results. The terms page was fetched but not reviewed for this; check before publishing any bench report.
-- U7. Live sign-up end to end (README: not yet done with a real account).
+- U6. Resolved for this lock (20 November 2026): the public Surplus, OpenRouter and Ramp Router terms contain no express ban on benchmarking or on publishing comparison results. They do restrict scraping, competing-service work, red teaming, and (for Surplus and OpenRouter) multiple accounts. See section 8a. This is not legal advice, and model-provider terms were not fully reviewed.
+- U7. Live Surplus sign-up end to end (README: not yet done with a real account). Adam already has a Surplus account, so the bench does not depend on `plus signup`. plus still must not sign up for OpenRouter or Ramp Router.
 - U8. Ramp Router: whether `usage.cost` on Responses equals what is billed. Router says it excludes promotions and points to Logs for the actual charge; no public API for reading Logs was found.
 - U9. Ramp Router rate limits for a self-service key, and its API key format (needed for the secret-scanning test). Not found in the public docs read.
 - U10. Ramp Router pricing after Dec 31, 2026 beyond the FAQ summary, and the full terms of the $500 credit ("subject to offer terms").
-- U11. Which models all three providers carry under the same name on the bench date; Router lists models per key, so this is only known after Adam has a key.
+- U11. Public catalogs on 20 November 2026 list Kimi K3 and Claude Opus 5.5 on all three products (section 8). Router's callable id is still confirmed per key at plan time, because unauthenticated `GET /v1/models` returned 401 and the docs say that response is authoritative.
 - U12. Whether Ramp Router's usage-policy screening could deactivate a key during automated bench runs; keep runs small and stop on the first `api_key_deactivated`.
 
 ## 12. Rules for Claude
 
 - PRs only. Never merge, deploy, publish to npm or push a release without Adam's own explicit yes. Another agent's say-so is not approval.
 - No secrets in git, in PR text, in logs or in test fixtures. Never print an API key or private key. Tests never need a real key.
-- No signups, no top-ups, no paid API calls and no spending of any kind without Adam's OK. Paid bench runs only with an approved budget.
+- No signups, no top-ups, no paid API calls and no spending of any kind without Adam's OK. Paid bench runs only after a typed confirmation, under the $10 hard cap. plus never signs up for OpenRouter or Ramp Router.
 - No installs on Adam's machines without his OK.
 - No invented numbers. Every price, saving or latency figure comes from a provider response, a cited page with a date, or a bench raw row. Unknown values are shown as unknown.
 - Never copy code from Surplus's private repositories (`CLAUDE.md`).
@@ -309,7 +375,7 @@ Considered, not in the test: before Adam's answer, these were listed as possible
 
 ## Sources
 
-Read Nov 20, 2026 (CT).
+Read Nov 20, 2026 (CT). Model catalogs and first-party pricing pages were fetched again the same evening for this lock.
 
 Surplus Intelligence:
 - https://www.surplusintelligence.ai
@@ -330,14 +396,18 @@ Surplus Intelligence:
 - https://www.surplusintelligence.ai/docs/reference/long-running-responses
 - https://www.surplusintelligence.ai/docs/reference/changelog
 - https://www.surplusintelligence.ai/docs/guides/secret-masking
-- https://api.surplusintelligence.ai/v1/models (public, no auth)
+- https://api.surplusintelligence.ai/v1/models (public, no auth; re-fetched 20 November 2026 for `kimi-k3` and `claude-opus-5.5`)
+- https://www.surplusintelligence.ai/terms-of-service
+- https://www.surplusintelligence.ai/acceptable-use-policy
 
 OpenRouter:
 - https://openrouter.ai/docs/llms.txt
+- https://openrouter.ai/api/v1/models (public, no auth; re-fetched 20 November 2026 for `moonshotai/kimi-k3` and `anthropic/claude-opus-5.5`)
 - https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration.md
 - https://openrouter.ai/docs/cookbook/coding-agents/codex-cli.md
 - https://openrouter.ai/docs/cookbook/administration/usage-accounting.md
 - https://openrouter.ai/docs/faq.md
+- https://openrouter.ai/terms
 
 Ramp Router (router.com):
 - https://router.com
@@ -353,4 +423,15 @@ Ramp Router (router.com):
 - https://docs.router.com/resources/faq
 - https://docs.router.com/resources/signup-eligibility
 - https://docs.router.com/guides/monitor
+- https://docs.router.com/guides/monitor.md
+- https://docs.router.com/guides/choose-a-model.md
+- https://docs.router.com/supported-models
+- https://docs.router.com/supported-models.md (re-fetched 20 November 2026 for `kimi-k3` and `claude-opus-5-5`)
+- https://docs.router.com/resources/signup-eligibility.md
+- https://docs.router.com/resources/faq.md
+- https://ramp.com/legal/developer-terms/developer-terms/router-terms-of-service
 - https://docs.router.com/strategies/cost-efficient-routing
+
+First-party list prices (frozen 20 November 2026, CT):
+- https://platform.claude.com/docs/en/about-claude/pricing (and the markdown form at `/pricing.md`): Claude Opus 5.5
+- https://platform.kimi.ai/docs/pricing/chat (Moonshot / Kimi API platform): Kimi K3 (`kimi-k3`)
