@@ -63,6 +63,8 @@ plus ask "hello"
 | `plus savings` | What you saved, model by model |
 | `plus logs` | Your recent requests: cost, list price and wait |
 
+Launchers take `--model` as their first argument, for example `plus claude --model glm-5.3` or `plus codex --model gpt-5-mini`. Before a tool starts, `plus` checks your key with Surplus and stops with a clear message if it is refused. `plus update` installs the latest version. How this compares with OpenRouter's Ori, feature by feature: [PARITY.md](PARITY.md).
+
 `plus ask` gives up after 90 seconds of silence (`--wait` changes it) and says so when an answer is cut off, instead of hanging.
 
 ## Compare routers
@@ -86,7 +88,7 @@ plus bench --live --save run.json                    # keep a run, replay it lat
 |---|---|
 | Surplus | `SURPLUS_API_KEY`, or your `plus login` |
 | OpenRouter | `OPENROUTER_API_KEY` |
-| Router by Ramp | `RAMP_ROUTER_API_KEY` and `RAMP_ROUTER_BASE_URL` (its address is not assumed) |
+| Router by Ramp | `RAMP_ROUTER_API_KEY` (address defaults to `https://api.router.com/v1`; Ramp's replies carry no cost, so its tokens are priced from its own model list) |
 
 Keys are never printed or saved. Three prompts are a quick reading, not a benchmark: use `--runs 3` for more samples. OpenRouter model names get a vendor prefix guessed from the name (`gpt-4o-mini` becomes `openai/gpt-4o-mini`).
 

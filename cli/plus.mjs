@@ -25,7 +25,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.2.0"; // kept equal to package.json by a test
+const VERSION = "0.3.0"; // kept equal to package.json by a test
 
 // ---- small helpers, exported for the tests ----
 
@@ -965,6 +965,9 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} aider [arguments]            aider, running on Surplus
   ${NAME} opencode [arguments]         OpenCode, running on Surplus
   ${NAME} run <program> [arguments]    any other tool, pointed at Surplus
+  ${NAME} update                       install the latest version
+
+  Launchers take --model first to pick the model: ${NAME} claude --model glm-5.3
 
   balance, savings, price, logs and compare take --json for scripts.
 `;
