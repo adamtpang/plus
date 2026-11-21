@@ -21,6 +21,12 @@ const server = createServer(async (req, res) => {
   for await (const chunk of req) text += chunk;
   const body = text ? JSON.parse(text) : {};
   const router = req.url.split("/")[1];
+  // Ramp reports no cost in its replies; its price comes from its model list.
+  if (req.url === "/ramp/v1/models") {
+    return res
+      .writeHead(200, { "content-type": "application/json" })
+      .end(JSON.stringify({ data: [{ id: "gpt-4o-mini", pricing: { prompt: "0.000001", completion: "0.000002" } }] }));
+  }
   if (req.url.endsWith("/models/" + body.model) || req.url.includes("/models/")) return res.writeHead(404).end();
   if (req.headers.authorization !== `Bearer ${KEYS[router]}`) return res.writeHead(401).end("{}");
 
@@ -111,6 +117,10 @@ test("--live measures every router that has a key, and never prints a key", asyn
   assert.ok(Math.abs(by("surplus").costUsd - 4e-6 * BENCH_PROMPTS.length) < 1e-12);
   assert.ok(Math.abs(by("openrouter").costUsd - 0.00001 * 1.055 * BENCH_PROMPTS.length) < 1e-12);
   assert.equal(by("ramp").quality, (BENCH_PROMPTS.length - 1) / BENCH_PROMPTS.length);
+  // Ramp's cost is priced from its catalog: 20 in x $0.000001 + 10 out x $0.000002 per request.
+  assert.ok(Math.abs(by("ramp").costUsd - 0.00004 * BENCH_PROMPTS.length) < 1e-12);
+  assert.equal(by("ramp").costSource, "catalog");
+  assert.equal(by("surplus").costSource, "reported");
   for (const key of Object.values(KEYS)) {
     assert.ok(!r.stdout.includes(key) && !r.stderr.includes(key), "a key was printed");
     assert.ok(!readFileSync(saved, "utf8").includes(key), "a key was saved");
@@ -118,6 +128,13 @@ test("--live measures every router that has a key, and never prints a key", asyn
   // The saved run can be replayed as a fixture.
   const replay = await cli(["--fixture", saved, "--json"], offline);
   assert.equal(replay.code, 0, replay.stderr);
+});
+
+test("--live says why a router failed", async () => {
+  const env = { ...offline, SURPLUS_API_KEY: "inf_refused", SURPLUS_BASE_URL: `${base}/surplus` };
+  const r = await cli(["--live", "-m", "gpt-4o-mini"], env);
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /surplus gpt-4o-mini: .*answered 401/);
 });
 
 test("--live skips a router with no key and says so", async () => {
