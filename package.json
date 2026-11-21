@@ -12,7 +12,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test cli/plus.test.mjs cli/wallet.test.mjs cli/account.test.mjs cli/ask.test.mjs cli/features.test.mjs cli/ask-bugs.test.mjs",
+    "test": "node --test cli/plus.test.mjs cli/wallet.test.mjs cli/account.test.mjs cli/ask.test.mjs cli/features.test.mjs cli/ask-bugs.test.mjs cli/bench.test.mjs",
     "plus": "node cli/plus.mjs"
   }
 }

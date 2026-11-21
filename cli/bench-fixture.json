@@ -1,0 +1,12 @@
+{
+  "note": "Example data for trying `plus bench --fixture` and for the tests. These are not measurements.",
+  "samples": [
+    { "router": "surplus", "model": "gpt-4o-mini", "prompt": "math", "ok": true, "pass": true, "ttftMs": 900, "totalMs": 1400, "inTokens": 20, "outTokens": 10, "costUsd": 0.000004 },
+    { "router": "surplus", "model": "gpt-4o-mini", "prompt": "capital", "ok": true, "pass": true, "ttftMs": 1100, "totalMs": 1500, "inTokens": 18, "outTokens": 8, "costUsd": 0.000003 },
+    { "router": "surplus", "model": "gpt-4o-mini", "prompt": "reverse", "ok": false, "error": "no data for 60 s" },
+    { "router": "openrouter", "model": "gpt-4o-mini", "prompt": "math", "ok": true, "pass": true, "ttftMs": 400, "totalMs": 700, "inTokens": 20, "outTokens": 10, "costUsd": 0.000009 },
+    { "router": "openrouter", "model": "gpt-4o-mini", "prompt": "capital", "ok": true, "pass": true, "ttftMs": 300, "totalMs": 600, "inTokens": 18, "outTokens": 8, "costUsd": 0.0000075 },
+    { "router": "openrouter", "model": "gpt-4o-mini", "prompt": "reverse", "ok": true, "pass": false, "ttftMs": 350, "totalMs": 650, "inTokens": 19, "outTokens": 9, "costUsd": 0.000008 },
+    { "router": "ramp", "model": "gpt-4o-mini", "prompt": "math", "ok": true, "pass": true, "ttftMs": 500, "totalMs": 900, "inTokens": 20, "outTokens": 10, "costUsd": null }
+  ]
+}
