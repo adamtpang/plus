@@ -734,11 +734,15 @@ function benchRouters() {
     },
     {
       name: "ramp",
-      base: process.env.RAMP_ROUTER_BASE_URL, // not confirmed publicly, so it must be given
+      // Address from Lago's Ramp Router guide (getlago.com), not Ramp's own docs.
+      base: process.env.RAMP_ROUTER_BASE_URL ?? "https://api.router.com/v1",
       key: process.env.RAMP_ROUTER_API_KEY,
       fee: 0,
       model: (m) => m,
       cost: (u) => (u?.cost != null ? Number(u.cost) : null),
+      // Ramp's replies carry no cost (it is in its dashboard), so price the
+      // tokens from its own model list instead.
+      priceFromCatalog: true,
     },
   ];
 }
@@ -772,9 +776,12 @@ export function benchSummary(samples) {
     const known = costs.length > 0 && costs.every((c) => c != null);
     const costUsd = known ? costs.reduce((a, b) => a + b, 0) * (1 + (fees[router] ?? 0)) : null;
     const tokens = ok.reduce((a, s) => a + (s.inTokens ?? 0) + (s.outTokens ?? 0), 0);
+    const sources = new Set(ok.map((s) => s.costSource ?? (s.costUsd != null ? "reported" : null)));
     return {
       router,
       model,
+      errors: [...new Set(group.filter((s) => !s.ok).map((s) => s.error))],
+      costSource: !known ? null : sources.size === 1 ? [...sources][0] : "mixed",
       attempts: group.length,
       errorRate: (group.length - ok.length) / group.length,
       quality: ok.length ? ok.filter((s) => s.pass).length / ok.length : null,
@@ -787,6 +794,31 @@ export function benchSummary(samples) {
 }
 
 // One streamed request, measured. Never throws: a failure is a sample too.
+// A router's own price list, as { model id: { prompt, completion } } in
+// dollars per token. Empty when it has none or will not say.
+async function catalogPrices(router) {
+  const res = await fetch(`${router.base}/models`, {
+    headers: { authorization: `Bearer ${router.key}` },
+    signal: AbortSignal.timeout(15_000),
+  }).catch(() => null);
+  if (!res?.ok) return {};
+  const body = await res.json().catch(() => ({}));
+  return Object.fromEntries((body.data ?? []).filter((m) => m.pricing).map((m) => [m.id, m.pricing]));
+}
+
+// What a request cost: as the router reported it, or else priced from its
+// catalog. `router.prices` is filled before the run for routers that need it.
+function costOf(router, model, usage) {
+  const reported = router.cost(usage);
+  if (reported != null) return { costUsd: reported, costSource: "reported" };
+  const p = router.prices?.[router.model(model)];
+  if (p && usage) {
+    const costUsd = Number(p.prompt ?? 0) * (usage.prompt_tokens ?? 0) + Number(p.completion ?? 0) * (usage.completion_tokens ?? 0);
+    return { costUsd, costSource: "catalog" };
+  }
+  return { costUsd: null, costSource: null };
+}
+
 async function benchOne(router, model, prompt, waitMs) {
   const sample = { router: router.name, model, prompt: prompt.id };
   const started = performance.now();
@@ -837,7 +869,7 @@ async function benchOne(router, model, prompt, waitMs) {
       totalMs: Math.round(totalMs),
       inTokens: usage?.prompt_tokens ?? null,
       outTokens: usage?.completion_tokens ?? null,
-      costUsd: router.cost(usage),
+      ...costOf(router, model, usage),
     };
   } catch (err) {
     return { ...sample, ok: false, error: err.name === "TimeoutError" ? `no answer in ${waitMs / 1000} s` : "connection failed" };
@@ -861,7 +893,8 @@ async function bench(flags) {
       skipped.push(r.name);
       return false;
     });
-    if (routers.length === 0) fail("No router has a key. Set SURPLUS_API_KEY, OPENROUTER_API_KEY, or RAMP_ROUTER_API_KEY with RAMP_ROUTER_BASE_URL.");
+    if (routers.length === 0) fail("No router has a key. Set SURPLUS_API_KEY, OPENROUTER_API_KEY, or RAMP_ROUTER_API_KEY.");
+    for (const r of routers) if (r.priceFromCatalog) r.prices = await catalogPrices(r);
     // Routers run side by side; within a router, one request at a time, so
     // they do not slow each other down.
     const perRouter = await Promise.all(
@@ -901,6 +934,8 @@ async function bench(flags) {
       ]),
     ]),
   );
+  for (const r of rows) if (r.errors.length) console.log(`${r.router} ${r.model}: ${Math.round(r.errorRate * r.attempts)} failed (${r.errors.join("; ")})`);
+  for (const r of rows) if (r.costSource === "catalog") console.log(`${r.router} ${r.model}: cost priced from its model list, since its replies do not report one`);
   for (const name of skipped) console.log(`${name}: skipped, no key`);
   console.log("\nCost includes OpenRouter's 5.5% credit fee. Quality is the share of answers matching the expected reply.");
 }
