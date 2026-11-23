@@ -21,11 +21,12 @@ const server = createServer(async (req, res) => {
   for await (const chunk of req) text += chunk;
   const body = text ? JSON.parse(text) : {};
   const router = req.url.split("/")[1];
-  // Ramp reports no cost in its replies; its price comes from its model list.
+  // Ramp reports no cost in its replies; its price comes from its model list,
+  // in the shape Ramp really uses: router.pricing, dollars per 1M tokens.
   if (req.url === "/ramp/v1/models") {
     return res
       .writeHead(200, { "content-type": "application/json" })
-      .end(JSON.stringify({ data: [{ id: "gpt-4o-mini", pricing: { prompt: "0.000001", completion: "0.000002" } }] }));
+      .end(JSON.stringify({ data: [{ id: "gpt-4o-mini", router: { pricing: { input: "1", output: "2" } } }] }));
   }
   if (req.url.endsWith("/models/" + body.model) || req.url.includes("/models/")) return res.writeHead(404).end();
   if (req.headers.authorization !== `Bearer ${KEYS[router]}`) return res.writeHead(401).end("{}");
