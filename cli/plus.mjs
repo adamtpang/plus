@@ -803,7 +803,14 @@ async function catalogPrices(router) {
   }).catch(() => null);
   if (!res?.ok) return {};
   const body = await res.json().catch(() => ({}));
-  return Object.fromEntries((body.data ?? []).filter((m) => m.pricing).map((m) => [m.id, m.pricing]));
+  const prices = {};
+  for (const m of body.data ?? []) {
+    // Ramp: router.pricing, dollars per 1M tokens. Others: pricing, dollars per token.
+    const r = m.router?.pricing;
+    if (r?.input != null) prices[m.id] = { prompt: Number(r.input) / 1e6, completion: Number(r.output ?? 0) / 1e6 };
+    else if (m.pricing) prices[m.id] = m.pricing;
+  }
+  return prices;
 }
 
 // What a request cost: as the router reported it, or else priced from its
