@@ -26,7 +26,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.5.1"; // kept equal to package.json by a test
+const VERSION = "0.5.2"; // kept equal to package.json by a test
 // What `-m auto` means: a cheap open-weight model. Surplus exposes no
 // "official" or compliance flag on its offers, so there is nothing to filter
 // on; Surplus itself picks the cheapest healthy seller for the model.
@@ -201,7 +201,7 @@ export function refusal(status, bodyText) {
     const err = JSON.parse(bodyText).error ?? {};
     const code = typeof err === "string" ? null : err.code;
     const message = typeof err === "string" ? err : err.message;
-    return [`${status}${code ? `, ${code}` : ""}`, message].filter(Boolean).join(": ").slice(0, 600);
+    return [`${status}${code ? `, ${code}` : ""}`, message].filter(Boolean).join(": ").split(" Unusual bug?")[0].slice(0, 400);
   } catch {
     return `${status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ""}`;
   }
@@ -210,8 +210,10 @@ export function refusal(status, bodyText) {
 // Stop with a message. It throws rather than exiting on the spot, so open
 // network connections get to close first (exiting mid-close crashes Node on
 // Windows). The entry point at the bottom prints it.
+// The error is marked as ours, so code that catches network failures can
+// tell "we decided to stop" from "the connection broke".
 function fail(message) {
-  throw new Error(message);
+  throw Object.assign(new Error(message), { ours: true });
 }
 
 // Merge new values into the saved config, keeping what is already there.
@@ -681,7 +683,7 @@ async function ask(prompt, flags) { // prompt may gain piped text below
       if (request.signal.reason === "silence") {
         fail(`no data for ${waitSeconds} s, so the request was dropped. Wait longer with --wait <seconds>.`);
       }
-      if (err.retryable) throw err;
+      if (err.retryable || err.ours) throw err; // already explained: pass it on unchanged
       if (firstToken) fail("the connection was dropped before the answer finished.");
       // Nothing was printed, so another try cannot show the answer twice.
       throw retryable(gotResponse ? "the connection was dropped before any answer arrived" : `could not reach Surplus: ${err.message}`);
