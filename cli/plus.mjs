@@ -546,8 +546,14 @@ async function ask(prompt, flags) { // prompt may gain piped text below
 // can lag, and a missing name must never break the receipt.
 async function sellerOf(requestId) {
   if (!requestId) return null;
-  const log = await api("/v1/requests?limit=5", undefined, undefined, 3000).catch(() => null);
-  return log?.items?.find((r) => r.request_id === requestId)?.provider ?? null;
+  // The log is usually a second or two behind the answer, so look a few times.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(1000);
+    const log = await api("/v1/requests?limit=5", undefined, undefined, 3000).catch(() => null);
+    const seller = log?.items?.find((r) => r.request_id === requestId)?.provider;
+    if (seller) return seller;
+  }
+  return null;
 }
 
 // One prompt, several models, side by side: the answer, the wait and the cost.
@@ -789,7 +795,9 @@ export function benchSummary(samples) {
       errorRate: (group.length - ok.length) / group.length,
       quality: ok.length ? ok.filter((s) => s.pass).length / ok.length : null,
       ttftMs: median(ok.map((s) => s.ttftMs)),
-      tokensPerSecond: median(ok.map((s) => (s.totalMs > s.ttftMs ? s.outTokens / ((s.totalMs - s.ttftMs) / 1000) : NaN))),
+      // A rate needs time to measure over. An answer that lands in one burst
+      // (under a quarter second after its first token) has no meaningful rate.
+      tokensPerSecond: median(ok.map((s) => (s.totalMs - s.ttftMs >= 250 ? s.outTokens / ((s.totalMs - s.ttftMs) / 1000) : NaN))),
       costUsd,
       perMillionTokensUsd: costUsd != null && tokens > 0 ? (costUsd / tokens) * 1e6 : null,
     };
@@ -938,7 +946,7 @@ async function bench(flags) {
         `${pct(r.errorRate)} of ${r.attempts}`,
         pct(r.quality),
         r.ttftMs == null ? "" : `${(r.ttftMs / 1000).toFixed(1)} s`,
-        r.tokensPerSecond == null ? "" : Math.round(r.tokensPerSecond),
+        r.tokensPerSecond == null ? (r.ttftMs == null ? "" : "one burst") : Math.round(r.tokensPerSecond),
         r.perMillionTokensUsd == null ? "" : usd(r.perMillionTokensUsd),
         money(r.costUsd),
       ]),
