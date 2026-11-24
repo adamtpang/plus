@@ -153,6 +153,7 @@ What it shows, and what it does not:
 - Surplus and OpenRouter served part of the input from cache (34% to 47% on Surplus), which lowers their price per token. Ramp's figure is its list price with no cache discount, because its replies report no cost.
 - OpenRouter's "+202%" on DeepSeek means the request was served by a pricier provider than the cheapest one its list shows.
 - Ramp's one failure was a 60 second timeout on one request. Surplus changed seller three times inside requests for glm-5.3-flash and still answered.
+- **The test key had a 50% minimum discount set on Surplus.** Surplus served a request only when a seller could beat list price by half, so its figures here are its price when a deep discount is on offer. With no minimum, more requests are served, at smaller discounts.
 - It is ten requests per row from one place on one day. Rerun it before quoting it.
 
 ### The quick set, one real run
@@ -176,7 +177,8 @@ Dollars per 1M tokens (input and output blended), as charged. OpenRouter include
 Read it with care:
 
 - **Surplus was 52% to 81% cheaper than OpenRouter per token, and 1.4 to 3 times slower to the first token.**
-- It is six short requests per cell. Prices on Surplus move with its market, and a model can be unavailable: two days earlier, every claude-sonnet-4.5 request on Surplus failed.
+- It is six short requests per cell, and prices on Surplus move with its market.
+- The test key had a 50% minimum discount set on Surplus. When no seller can beat that, Surplus refuses the request (`minimum_discount_not_met`, sent with a 404 status) instead of serving it at a smaller discount. Two days earlier that refused every claude-sonnet-4.5 request. `plus` now prints the reason.
 - Ramp refused Claude because of a US data residency setting on the test account, not a fault in Ramp.
 - Run it yourself before trusting it: `plus bench --live`.
 
