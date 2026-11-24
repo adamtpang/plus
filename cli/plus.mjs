@@ -738,7 +738,7 @@ function benchRouters() {
       base: process.env.RAMP_ROUTER_BASE_URL ?? "https://api.router.com/v1",
       key: process.env.RAMP_ROUTER_API_KEY,
       fee: 0,
-      model: (m) => m,
+      model: rampModelName,
       cost: (u) => (u?.cost != null ? Number(u.cost) : null),
       // Ramp's replies carry no cost (it is in its dashboard), so price the
       // tokens from its own model list instead.
@@ -746,6 +746,9 @@ function benchRouters() {
     },
   ];
 }
+
+// Ramp writes Claude versions with dashes: claude-sonnet-4-5, not 4.5.
+export const rampModelName = (m) => (m.startsWith("claude") ? m.replaceAll(".", "-") : m);
 
 // OpenRouter names models "vendor/model". A guess from the name's start.
 function vendorOf(model) {
