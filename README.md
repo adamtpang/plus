@@ -1,6 +1,6 @@
 # plus
 
-An unofficial command-line tool for [Surplus Intelligence](https://www.surplusintelligence.ai). It is not made or endorsed by Surplus.
+An unofficial command-line tool for [Surplus Intelligence](https://www.surplusintelligence.ai). It is not made or endorsed by Surplus. Site: [pluscli.vercel.app](https://pluscli.vercel.app).
 
 It does three things:
 
