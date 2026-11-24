@@ -174,3 +174,11 @@ test("bench names the reason a router refused, and does not count unanswered pro
   assert.match(row.errors[0], /404.*minimum_discount_not_met/);
   assert.deepEqual(row.byType.quick, { pass: 0, of: 0 }); // nothing was answered, so nothing was wrong
 });
+
+test("a refusal is final: it is not retried, and not blamed on the connection", async () => {
+  const before = chats("floored");
+  const r = await cli(["ask", "hi", "-m", "floored"]);
+  assert.equal(r.code, 1);
+  assert.equal(chats("floored") - before, 1, "it was sent more than once");
+  assert.doesNotMatch(r.stderr, /could not reach|failed 3 times/);
+});
