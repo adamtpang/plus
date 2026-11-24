@@ -9,3 +9,6 @@ docs/private/
 docs/grokbot/
 docs/sessions/
 SESSION_DIGEST.md
+
+# local preview config
+.claude/launch.json
