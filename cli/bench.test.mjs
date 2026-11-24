@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
-import { benchSummary, BENCH_PROMPTS } from "./plus.mjs";
+import { benchSummary, BENCH_PROMPTS, rampModelName } from "./plus.mjs";
 
 const KEYS = { surplus: "inf_" + "ee11".repeat(8), openrouter: "sk-or-test-SECRETOR", ramp: "ramp-test-SECRETRAMP" };
 
@@ -144,4 +144,10 @@ test("--live skips a router with no key and says so", async () => {
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /openrouter.*no key/i);
   assert.match(r.stdout, /ramp.*no key/i);
+});
+
+test("Ramp spells Claude versions with dashes", () => {
+  assert.equal(rampModelName("claude-sonnet-4.5"), "claude-sonnet-4-5");
+  assert.equal(rampModelName("gpt-4o-mini"), "gpt-4o-mini");
+  assert.equal(rampModelName("deepseek-v4.1-flash"), "deepseek-v4.1-flash"); // only Claude names change
 });
