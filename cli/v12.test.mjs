@@ -51,6 +51,10 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/v1/chat/completions") {
     const n = (tries[body.model] = (tries[body.model] ?? 0) + 1);
     if (body.model === "down") return json(503, { error: "no seller" });
+    if (body.model === "floored") {
+      // What Surplus really sends when the key's minimum discount cannot be met.
+      return json(404, { error: { type: "invalid_request_error", code: "minimum_discount_not_met", message: "No marketplace sellers currently meet the minimum 50% estimated discount for 'floored'. Lower your minimum to 25% or below and the best currently-eligible offer will serve this request." } });
+    }
     if (body.model === "flaky" && n === 1) return json(503, { error: "seller failed" });
     if (body.model === "flaky-drop" && n === 1) return req.socket.destroy(); // dies before any answer
     return stream(res);
@@ -153,4 +157,20 @@ test("run --print-env names the variables and never shows the key", async () => 
   assert.ok(!r.stdout.includes(KEY), "the key was printed");
   assert.match(r.stdout, /Cursor/);
   assert.match(r.stdout, /Kilo/);
+});
+
+test("a refusal from Surplus is shown in its own words, not as a bare status", async () => {
+  const r = await cli(["ask", "hi", "-m", "floored"]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /minimum_discount_not_met/);
+  assert.match(r.stderr, /Lower your minimum to 25% or below/);
+  assert.doesNotMatch(r.stderr, /\{"error"/, "raw JSON was printed");
+});
+
+test("bench names the reason a router refused, and does not count unanswered prompts as wrong", async () => {
+  const r = await cli(["bench", "--live", "--quick", "-m", "floored", "--json"], { OPENROUTER_API_KEY: "", RAMP_ROUTER_API_KEY: "" });
+  assert.equal(r.code, 0, r.stderr);
+  const [row] = JSON.parse(r.stdout).rows;
+  assert.match(row.errors[0], /404.*minimum_discount_not_met/);
+  assert.deepEqual(row.byType.quick, { pass: 0, of: 0 }); // nothing was answered, so nothing was wrong
 });
