@@ -88,20 +88,38 @@ Launchers take `--model` as their first argument, for example `plus claude --mod
 
 ## Compare routers
 
-`plus bench` sends the same three short prompts, each with one right answer, through Surplus, OpenRouter and Router by Ramp, and reports for each router and model:
+`plus bench` sends the same prompts through Surplus, OpenRouter and Router by Ramp and measures each the same way.
 
-- **price actually charged**, as each router reports it, plus OpenRouter's 5.5% credit fee
-- **time to first token** and **tokens per second** (medians)
-- **error rate**
-- **quality**: the share of answers that match the expected reply
+**The prompts.** Ten are built in, two of each kind: short coding, tool use, web pages, long context, and multi-turn repair. Each has a check that needs no judge:
+
+| Kind | How an answer is checked |
+|---|---|
+| Coding, repair | The function in the reply is run against unit tests, in a bare sandbox with a one second limit |
+| Tool use | The model must call the right tool with arguments that parse and match |
+| Web | The page or CSS must contain the required parts |
+| Long context | One exact value must be found in a 300-line document |
+
+`--quick` uses three one-line prompts instead. `--prompts file.jsonl` uses your own, each checked by a pattern.
+
+**What it reports**, per router and model:
+
+- **failures**, by kind: timeout, a 4xx or 5xx reply, dropped mid-answer, empty, cut off at the length limit, or a tool call that does not parse
+- **time to first token** and **tokens per second**, at the middle (p50) and the slow end (p95)
+- **cost actually charged**, per 1M tokens, and against that router's own list price for the same tokens
+- **cached input** as a share of input tokens
+- **correct answers**, overall and by kind
+- retries, and how often Surplus changed seller inside one request
 
 ```bash
 plus bench --fixture cli/bench-fixture.json          # example data: no keys, no network
-plus bench --live -m gpt-4o-mini,deepseek-v4-flash   # real requests, costs a fraction of a cent
-plus bench --live --save run.json                    # keep a run, replay it later with --fixture
+plus bench --live -m gpt-4o-mini,glm-5.3-flash       # the ten prompts, about a cent on cheap models
+plus bench --live --quick                            # three one-line prompts
+plus bench --live -m shortlist --out run.jsonl       # eight models; costs more, set PLUS_SPEND_CAP
+plus bench --fixture run.jsonl                       # replay a saved run
+plus bench --help                                    # every flag
 ```
 
-`--live` uses every router you have a key for and skips the rest:
+`--live` uses every router you have a key for and skips the rest. A model a router does not list is skipped and reported, not scored as zero.
 
 | Router | Settings |
 |---|---|
@@ -109,9 +127,35 @@ plus bench --live --save run.json                    # keep a run, replay it lat
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Router by Ramp | `RAMP_ROUTER_API_KEY` (address defaults to `https://api.router.com/v1`; Ramp's replies carry no cost, so its tokens are priced from its own model list) |
 
-Keys are never printed or saved. Three prompts are a quick reading, not a benchmark: use `--runs 3` for more samples. OpenRouter model names get a vendor prefix guessed from the name (`gpt-4o-mini` becomes `openai/gpt-4o-mini`).
+Keys are never printed or saved. Each router's model list is read first, so the same model is found under each router's own spelling. `--out` writes one JSON line per request, including the exact model each router served.
 
-### One real run
+Limits worth knowing: one run is ten requests per model per router, so p95 is close to "the slowest one"; use `--runs 3` for more. The checks are strict and simple, and passing them shows a model handled ordinary work, not that it is the best model. Replies to coding prompts are run as code on your machine, in a sandbox with no files or network, which contains mistakes but is not a defence against code written to escape.
+
+### The full set, one real run
+
+24 November 2026, one machine in the US, the ten built-in prompts once each.
+
+| Model | Router | Failed | Correct | First token p50 / p95 | $ per 1M tokens | Against its list |
+|---|---|---|---|---|---|---|
+| gpt-4o-mini | Surplus | 0 of 10 | 10 of 10 | 0.9 s / 2.0 s | $0.025 | -85% |
+| gpt-4o-mini | OpenRouter | 0 of 10 | 10 of 10 | 0.6 s / 1.2 s | $0.139 | -16% |
+| gpt-4o-mini | Ramp | 0 of 10 | 10 of 10 | 0.6 s / 1.5 s | $0.166 | 0% |
+| glm-5.3-flash | Surplus | 0 of 10 | 10 of 10 | 2.3 s / 4.1 s | $0.005 | -97% |
+| glm-5.3-flash | OpenRouter | 0 of 10 | 10 of 10 | 1.0 s / 1.9 s | $0.181 | -11% |
+| glm-5.3-flash | Ramp | 1 of 10 | 8 of 9 | 1.4 s / 19.4 s | $0.202 | 0% |
+| deepseek-v4.1-flash | Surplus | 0 of 10 | 10 of 10 | 1.7 s / 3.5 s | $0.009 | -97% |
+| deepseek-v4.1-flash | OpenRouter | 0 of 10 | 10 of 10 | 0.8 s / 2.7 s | $0.203 | +202% |
+| deepseek-v4.1-flash | Ramp | 0 of 10 | 10 of 10 | 0.9 s / 2.5 s | $0.405 | 0% |
+
+What it shows, and what it does not:
+
+- **Surplus was the cheapest on all three models by a wide margin, and the slowest to the first token.**
+- Surplus and OpenRouter served part of the input from cache (34% to 47% on Surplus), which lowers their price per token. Ramp's figure is its list price with no cache discount, because its replies report no cost.
+- OpenRouter's "+202%" on DeepSeek means the request was served by a pricier provider than the cheapest one its list shows.
+- Ramp's one failure was a 60 second timeout on one request. Surplus changed seller three times inside requests for glm-5.3-flash and still answered.
+- It is ten requests per row from one place on one day. Rerun it before quoting it.
+
+### The quick set, one real run
 
 24 November 2026, from one machine in the US: three prompts, twice each, per model per router. Every answer from every router was correct, and no request failed except where noted.
 

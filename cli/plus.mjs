@@ -26,7 +26,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.4.0"; // kept equal to package.json by a test
+const VERSION = "0.5.0"; // kept equal to package.json by a test
 // What `-m auto` means: a cheap open-weight model. Surplus exposes no
 // "official" or compliance flag on its offers, so there is nothing to filter
 // on; Surplus itself picks the cheapest healthy seller for the model.
@@ -1470,6 +1470,7 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} models                       a short list: Surplus price next to an Arena quality score
   ${NAME} doctor                       check your setup, one thing at a time
   ${NAME} bench --live [-m a,b]        Surplus, OpenRouter and Ramp, same prompts, side by side
+                                      (${NAME} bench --help: the prompt set and every flag)
                                       (--fixture <file>: replay saved results, no keys or network)
                                       (--save <file>: keep a live run to replay later)
   ${NAME} claude [arguments]           Claude Code, running on Surplus
