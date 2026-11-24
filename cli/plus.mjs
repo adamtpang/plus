@@ -16,6 +16,7 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { runInNewContext } from "node:vm";
 
 const NAME = basename(process.argv[1] ?? "plus").replace(/\.(mjs|js|cmd)$/, "");
 const BASE = process.env.SURPLUS_BASE_URL ?? "https://api.surplusintelligence.ai";
@@ -888,18 +889,161 @@ function update(flags) {
 
 // ---- bench: the same prompts through several routers ----
 
-// Short prompts with one right answer, so quality can be checked by a
-// pattern instead of by opinion. `sample` is a correct reply, used by tests.
+// The quick set: three short prompts with one right answer each. `sample` is
+// a correct reply, used by tests.
 export const BENCH_PROMPTS = [
   { id: "math", text: "What is 17 * 23? Reply with only the number.", expect: /\b391\b/, sample: "391" },
   { id: "capital", text: "What is the capital of Australia? Reply with one word.", expect: /canberra/i, sample: "Canberra" },
   { id: "reverse", text: "Write the word stream backwards. Reply with only that.", expect: /maerts/i, sample: "maerts" },
 ];
 
+// Does the code in a reply define `name`, and does it give the expected
+// result for every case? The code runs in a bare sandbox (no files, no
+// network, no require) with a one second limit per step. That keeps honest
+// mistakes contained; it is not a defence against code written to escape.
+function passesTests(reply, name, cases) {
+  const fenced = reply.match(/```[\w-]*\n([\s\S]*?)```/);
+  const code = (fenced ? fenced[1] : reply).replace(/^\s*export\s+(default\s+)?/gm, "");
+  try {
+    const box = {};
+    runInNewContext(`${code}\n;this.__f = typeof ${name} === "function" ? ${name} : null;`, box, { timeout: 1000 });
+    if (!box.__f) return false;
+    return cases.every(([args, want]) => {
+      const got = runInNewContext(`JSON.stringify(__f(...${JSON.stringify(args)}))`, box, { timeout: 1000 });
+      return got === JSON.stringify(want);
+    });
+  } catch {
+    return false;
+  }
+}
+
+// Did the model call the tool, with arguments that parse and match?
+function calledTool(calls, name, want) {
+  const call = calls.find((c) => c.name === name);
+  if (!call) return false;
+  try {
+    const args = JSON.parse(call.arguments);
+    return Object.entries(want).every(([key, value]) => String(args[key]).toLowerCase() === String(value).toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+// A long document with one fact to find. Made by a formula, so every run
+// sends the same text and the right answer is known.
+const accessCode = (i) => `K${((i * 7919 + 104729) % 900000) + 100000}`;
+const records = (count) =>
+  Array.from({ length: count }, (_, i) => `Record ${i + 1}: access code ${accessCode(i + 1)}, status active, reviewed by desk ${(i % 7) + 1}.`).join("\n");
+const findRecord = (id, count, n) => ({
+  id,
+  type: "long-context",
+  messages: [{ role: "user", content: `${records(count)}\n\nWhat is the access code for record ${n}? Reply with only the code.` }],
+  check: (reply) => reply.includes(accessCode(n)),
+  sample: { text: accessCode(n) },
+});
+
+const tool = (name, description, properties) => ({
+  type: "function",
+  function: { name, description, parameters: { type: "object", properties, required: Object.keys(properties) } },
+});
+const SLUGIFY = "function slugify(s) {\n  return s.toLowerCase().replace(/[^a-z0-9]+/g, \"-\").replace(/^-+|-+$/g, \"\");\n}";
+const CHUNK = "function chunk(items, size) {\n  const out = [];\n  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));\n  return out;\n}";
+const MEDIAN = "function median(values) {\n  const v = [...values].sort((a, b) => a - b);\n  const mid = Math.floor(v.length / 2);\n  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;\n}";
+const CAPITALIZE = "function capitalize(s) {\n  return s.split(\" \").map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(\" \");\n}";
+const COUNTER_PAGE =
+  '<!doctype html>\n<html><body>\n<button id="counter">0</button>\n<script>\nconst b = document.getElementById("counter");\nb.addEventListener("click", () => { b.textContent = Number(b.textContent) + 1; });\n</script>\n</body></html>';
+const CENTERED_CSS = ".card-wrap {\n  display: flex;\n  justify-content: center;\n  align-items: center;\n  min-height: 100vh;\n}";
+
+// The full set: two prompts of each kind the spec names. Every one has a
+// check that needs no judge: unit tests for code, the tool call itself for
+// tool use, required markup for web pages, an exact value for long context.
+export const BENCH_SET = [
+  {
+    id: "code-slugify",
+    type: "coding",
+    messages: [{ role: "user", content: "Write a JavaScript function slugify(s) that lowercases s, turns every run of characters that are not a-z or 0-9 into a single hyphen, and removes hyphens from both ends. Reply with only the function in a code block." }],
+    check: (reply) => passesTests(reply, "slugify", [[["Hello, World!"], "hello-world"], [["  A  b__C "], "a-b-c"], [["x"], "x"]]),
+    sample: { text: "```js\n" + SLUGIFY + "\n```" },
+  },
+  {
+    id: "code-chunk",
+    type: "coding",
+    messages: [{ role: "user", content: "Write a JavaScript function chunk(items, size) that splits the array items into arrays of at most size elements, in order. Reply with only the function in a code block." }],
+    check: (reply) => passesTests(reply, "chunk", [[[[1, 2, 3, 4, 5], 2], [[1, 2], [3, 4], [5]]], [[[], 3], []], [[[1, 2], 5], [[1, 2]]]]),
+    sample: { text: "```js\n" + CHUNK + "\n```" },
+  },
+  {
+    id: "tool-weather",
+    type: "tool-use",
+    messages: [{ role: "user", content: "What is the weather in Paris right now? Use the tool." }],
+    tools: [tool("get_weather", "Get the current weather for a city", { city: { type: "string" } })],
+    check: (_reply, calls) => calledTool(calls, "get_weather", { city: "Paris" }),
+    sample: { tool: { name: "get_weather", arguments: { city: "Paris" } } },
+  },
+  {
+    id: "tool-cart",
+    type: "tool-use",
+    messages: [{ role: "user", content: "Add 3 apples to my cart. Use the tool." }],
+    tools: [tool("add_to_cart", "Add an item to the shopping cart", { item: { type: "string" }, quantity: { type: "integer" } })],
+    check: (_reply, calls) => {
+      const call = calls.find((c) => c.name === "add_to_cart");
+      try {
+        const args = JSON.parse(call.arguments);
+        return /apple/i.test(args.item) && Number(args.quantity) === 3;
+      } catch {
+        return false;
+      }
+    },
+    sample: { tool: { name: "add_to_cart", arguments: { item: "apples", quantity: 3 } } },
+  },
+  {
+    id: "web-counter",
+    type: "webdev",
+    messages: [{ role: "user", content: 'Write one complete HTML page with a button whose id is "counter". It shows 0 and goes up by one on each click. Use a script tag, no libraries. Reply with only the HTML.' }],
+    check: (reply) => /<button[^>]*id=["']counter["']/i.test(reply) && /<script/i.test(reply) && /addEventListener|onclick/i.test(reply),
+    sample: { text: COUNTER_PAGE },
+  },
+  {
+    id: "web-center",
+    type: "webdev",
+    messages: [{ role: "user", content: "Write the CSS for a class .card-wrap that centers its one child both horizontally and vertically using flexbox and is at least as tall as the screen. Reply with only the CSS." }],
+    check: (reply) => /display:\s*flex/i.test(reply) && /justify-content:\s*center/i.test(reply) && /align-items:\s*center/i.test(reply),
+    sample: { text: CENTERED_CSS },
+  },
+  findRecord("long-187", 300, 187),
+  findRecord("long-42", 300, 42),
+  {
+    id: "repair-median",
+    type: "repair",
+    messages: [
+      { role: "user", content: "Write a JavaScript function median(values) for an array of numbers." },
+      { role: "assistant", content: "```js\nfunction median(values) {\n  const v = values.sort();\n  return v[Math.floor(v.length / 2)];\n}\n```" },
+      { role: "user", content: "That is wrong: median([10, 9, 100]) gives 100, and median([1, 2, 3, 4]) should be 2.5. It also must not change the array passed in. Fix it. Reply with only the corrected function in a code block." },
+    ],
+    check: (reply) => passesTests(reply, "median", [[[[10, 9, 100]], 10], [[[1, 2, 3, 4]], 2.5], [[[5]], 5]]),
+    sample: { text: "```js\n" + MEDIAN + "\n```" },
+  },
+  {
+    id: "repair-capitalize",
+    type: "repair",
+    messages: [
+      { role: "user", content: "Write a JavaScript function capitalize(s) that makes the first letter of every word uppercase." },
+      { role: "assistant", content: "```js\nfunction capitalize(s) {\n  return s[0].toUpperCase() + s.slice(1);\n}\n```" },
+      { role: "user", content: 'That only does the first word, and it crashes on an empty string. capitalize("hello big world") should give "Hello Big World" and capitalize("") should give "". Words are separated by single spaces. Fix it. Reply with only the corrected function in a code block.' },
+    ],
+    check: (reply) => passesTests(reply, "capitalize", [[["hello big world"], "Hello Big World"], [[""], ""], [["a"], "A"]]),
+    sample: { text: "```js\n" + CAPITALIZE + "\n```" },
+  },
+];
+
+// The spec's short list of models, for `-m shortlist`.
+const BENCH_MODELS = ["gemini-4-carbon", "claude-opus-5.5", "claude-sonnet-5.5", "kimi-k3", "glm-5.3", "glm-5.3-flash", "mimo-v2.6-pro", "deepseek-v4.1-flash"];
+
 // The routers. Keys come only from the environment (Surplus also from the
 // saved login). `fee` is added to what a router reports: OpenRouter charges
 // 5.5% when credits are bought, not per request. `cost` reads the charge in
 // dollars from a reply's usage, or null when the router does not report it.
+// `guess` is the model name to try when the router's own list cannot be read.
 function benchRouters() {
   return [
     {
@@ -907,7 +1051,7 @@ function benchRouters() {
       base: `${BASE}/v1`,
       key: process.env.SURPLUS_API_KEY || readConfig().apiKey,
       fee: 0,
-      model: (m) => m,
+      guess: (m) => m,
       cost: (u) => (u?.buyer_cost_micro != null ? dollars(u.buyer_cost_micro) : null),
     },
     {
@@ -916,7 +1060,7 @@ function benchRouters() {
       key: process.env.OPENROUTER_API_KEY,
       fee: 0.055,
       extra: { usage: { include: true } }, // asks OpenRouter to report the charge
-      model: (m) => (m.includes("/") ? m : `${vendorOf(m)}/${m}`),
+      guess: (m) => (m.includes("/") ? m : `${vendorOf(m)}/${m}`),
       cost: (u) => (u?.cost != null ? Number(u.cost) : null),
     },
     {
@@ -925,11 +1069,10 @@ function benchRouters() {
       base: process.env.RAMP_ROUTER_BASE_URL ?? "https://api.router.com/v1",
       key: process.env.RAMP_ROUTER_API_KEY,
       fee: 0,
-      model: rampModelName,
+      guess: rampModelName,
+      // Ramp's replies carry no cost (it is in its dashboard), so its tokens
+      // are priced from its own model list instead.
       cost: (u) => (u?.cost != null ? Number(u.cost) : null),
-      // Ramp's replies carry no cost (it is in its dashboard), so price the
-      // tokens from its own model list instead.
-      priceFromCatalog: true,
     },
   ];
 }
@@ -939,10 +1082,48 @@ export const rampModelName = (m) => (m.startsWith("claude") ? m.replaceAll(".", 
 
 // OpenRouter names models "vendor/model". A guess from the name's start.
 function vendorOf(model) {
-  const known = [["gpt", "openai"], ["o1", "openai"], ["o3", "openai"], ["claude", "anthropic"], ["gemini", "google"], ["deepseek", "deepseek"], ["glm", "z-ai"], ["kimi", "moonshotai"], ["qwen", "qwen"], ["llama", "meta-llama"], ["grok", "x-ai"], ["mistral", "mistralai"]];
+  const known = [["gpt", "openai"], ["o1", "openai"], ["o3", "openai"], ["claude", "anthropic"], ["gemini", "google"], ["deepseek", "deepseek"], ["glm", "z-ai"], ["kimi", "moonshotai"], ["qwen", "qwen"], ["llama", "meta-llama"], ["grok", "x-ai"], ["mistral", "mistralai"], ["mimo", "xiaomi"]];
   return known.find(([start]) => model.startsWith(start))?.[1] ?? "openai";
 }
 
+// Routers spell the same model differently: "vendor/glm-5.3", "glm-5p3",
+// "claude-sonnet-5-5". This reduces a name to one comparable form.
+const plainName = (id) => id.toLowerCase().replace(/^.*\//, "").replace(/(\d)[p-](\d)/g, "$1.$2");
+
+// A router's own model list: the exact ids it accepts, and its list price for
+// each in dollars per token. null when the list cannot be read.
+async function catalog(router) {
+  const res = await fetch(`${router.base}/models`, {
+    headers: { authorization: `Bearer ${router.key}` },
+    signal: AbortSignal.timeout(15_000),
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  const body = await res.json().catch(() => ({}));
+  const prices = {};
+  const ids = [];
+  for (const m of body.data ?? []) {
+    ids.push(m.id);
+    // Ramp: router.pricing, dollars per 1M tokens. Others: pricing, dollars per token.
+    const r = m.router?.pricing;
+    if (r?.input != null) prices[m.id] = { prompt: Number(r.input) / 1e6, completion: Number(r.output ?? 0) / 1e6 };
+    else if (m.pricing) prices[m.id] = { prompt: Number(m.pricing.prompt) || 0, completion: Number(m.pricing.completion) || 0 };
+  }
+  return ids.length ? { ids, prices } : null;
+}
+
+// The name this router uses for a model, or null if its list has no such model.
+function routerModel(router, model) {
+  if (!router.catalog) return router.guess(model);
+  const { ids } = router.catalog;
+  return ids.find((id) => id === model) ?? ids.find((id) => id === router.guess(model)) ?? ids.find((id) => plainName(id) === plainName(model)) ?? null;
+}
+
+// The value at a percentile, by nearest rank. null for an empty list.
+export function percentile(values, p) {
+  const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  return v[Math.max(0, Math.ceil((p / 100) * v.length) - 1)];
+}
 const median = (values) => {
   const v = values.filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
   if (v.length === 0) return null;
@@ -955,89 +1136,99 @@ export function benchSummary(samples) {
   const fees = Object.fromEntries(benchRouters().map((r) => [r.name, r.fee]));
   const groups = new Map();
   for (const s of samples) {
+    if (s.skipped) continue;
     const key = `${s.router} ${s.model}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   }
   return [...groups.values()].map((group) => {
     const { router, model } = group[0];
+    const fee = 1 + (fees[router] ?? 0);
     const ok = group.filter((s) => s.ok);
+    const failed = group.filter((s) => !s.ok);
     const costs = ok.map((s) => s.costUsd);
     const known = costs.length > 0 && costs.every((c) => c != null);
-    const costUsd = known ? costs.reduce((a, b) => a + b, 0) * (1 + (fees[router] ?? 0)) : null;
+    const costUsd = known ? costs.reduce((a, b) => a + b, 0) * fee : null;
     const tokens = ok.reduce((a, s) => a + (s.inTokens ?? 0) + (s.outTokens ?? 0), 0);
+    const inTokens = ok.reduce((a, s) => a + (s.inTokens ?? 0), 0);
+    const listed = ok.every((s) => s.listUsd != null) && ok.length > 0 ? ok.reduce((a, s) => a + s.listUsd, 0) : null;
     const sources = new Set(ok.map((s) => s.costSource ?? (s.costUsd != null ? "reported" : null)));
+    // A rate needs time to measure over. An answer that lands in one burst
+    // (under a quarter second after its first token) has no meaningful rate.
+    const rates = ok.map((s) => (s.totalMs - s.ttftMs >= 250 ? s.outTokens / ((s.totalMs - s.ttftMs) / 1000) : NaN));
+    const failureKinds = {};
+    for (const s of failed) failureKinds[s.kind ?? "error"] = (failureKinds[s.kind ?? "error"] ?? 0) + 1;
+    const byType = {};
+    for (const s of group) {
+      const t = (byType[s.type ?? "quick"] ??= { pass: 0, of: 0 });
+      t.of++;
+      if (s.ok && s.pass) t.pass++;
+    }
     return {
       router,
       model,
-      errors: [...new Set(group.filter((s) => !s.ok).map((s) => s.error))],
-      costSource: !known ? null : sources.size === 1 ? [...sources][0] : "mixed",
       attempts: group.length,
-      errorRate: (group.length - ok.length) / group.length,
+      failures: failed.length,
+      failureKinds,
+      errors: [...new Set(failed.map((s) => s.error))],
+      errorRate: failed.length / group.length,
+      retries: group.reduce((a, s) => a + (s.retries ?? 0), 0),
+      failovers: group.reduce((a, s) => a + (s.failovers ?? 0), 0),
       quality: ok.length ? ok.filter((s) => s.pass).length / ok.length : null,
+      byType,
       ttftMs: median(ok.map((s) => s.ttftMs)),
-      // A rate needs time to measure over. An answer that lands in one burst
-      // (under a quarter second after its first token) has no meaningful rate.
-      tokensPerSecond: median(ok.map((s) => (s.totalMs - s.ttftMs >= 250 ? s.outTokens / ((s.totalMs - s.ttftMs) / 1000) : NaN))),
+      ttftP50Ms: percentile(ok.map((s) => s.ttftMs), 50),
+      ttftP95Ms: percentile(ok.map((s) => s.ttftMs), 95),
+      tokensPerSecond: median(rates),
+      tokensPerSecondP95: percentile(rates, 95),
       costUsd,
+      costSource: !known ? null : sources.size === 1 ? [...sources][0] : "mixed",
       perMillionTokensUsd: costUsd != null && tokens > 0 ? (costUsd / tokens) * 1e6 : null,
+      listUsd: listed,
+      vsListPct: costUsd != null && listed ? Math.round((costUsd / listed - 1) * 100) : null,
+      cacheSharePct: inTokens > 0 ? Math.round((ok.reduce((a, s) => a + (s.cachedTokens ?? 0), 0) / inTokens) * 100) : null,
     };
   });
 }
 
-// One streamed request, measured. Never throws: a failure is a sample too.
-// A router's own price list, as { model id: { prompt, completion } } in
-// dollars per token. Empty when it has none or will not say.
-async function catalogPrices(router) {
-  const res = await fetch(`${router.base}/models`, {
-    headers: { authorization: `Bearer ${router.key}` },
-    signal: AbortSignal.timeout(15_000),
-  }).catch(() => null);
-  if (!res?.ok) return {};
-  const body = await res.json().catch(() => ({}));
-  const prices = {};
-  for (const m of body.data ?? []) {
-    // Ramp: router.pricing, dollars per 1M tokens. Others: pricing, dollars per token.
-    const r = m.router?.pricing;
-    if (r?.input != null) prices[m.id] = { prompt: Number(r.input) / 1e6, completion: Number(r.output ?? 0) / 1e6 };
-    else if (m.pricing) prices[m.id] = m.pricing;
-  }
-  return prices;
-}
-
 // What a request cost: as the router reported it, or else priced from its
-// catalog. `router.prices` is filled before the run for routers that need it.
-function costOf(router, model, usage) {
+// model list. Also what the same tokens cost at that router's list price.
+function costOf(router, sentAs, usage) {
+  const p = router.catalog?.prices[sentAs];
+  const listUsd = p && usage ? p.prompt * (usage.prompt_tokens ?? 0) + p.completion * (usage.completion_tokens ?? 0) : null;
   const reported = router.cost(usage);
-  if (reported != null) return { costUsd: reported, costSource: "reported" };
-  const p = router.prices?.[router.model(model)];
-  if (p && usage) {
-    const costUsd = Number(p.prompt ?? 0) * (usage.prompt_tokens ?? 0) + Number(p.completion ?? 0) * (usage.completion_tokens ?? 0);
-    return { costUsd, costSource: "catalog" };
-  }
-  return { costUsd: null, costSource: null };
+  if (reported != null) return { costUsd: reported, costSource: "reported", listUsd };
+  return { costUsd: listUsd, costSource: listUsd == null ? null : "catalog", listUsd };
 }
 
-async function benchOne(router, model, prompt, waitMs) {
-  const sample = { router: router.name, model, prompt: prompt.id };
+// One streamed request, measured. Never throws: a failure is a sample too.
+// `kind` names the failure: timeout, http_4xx, http_5xx, dropped, empty,
+// truncated or tool_parse.
+async function benchOnce(router, model, sentAs, prompt, waitMs) {
+  const sample = { router: router.name, model, requestedAs: sentAs, prompt: prompt.id, type: prompt.type ?? "quick" };
   const started = performance.now();
   let ttft = null;
   let text = "";
   let usage = null;
+  let served = null;
+  let finish = null;
+  const calls = []; // tool calls, built up from pieces as they stream in
   try {
     const res = await fetch(`${router.base}/chat/completions`, {
       method: "POST",
       signal: AbortSignal.timeout(waitMs),
       headers: { "content-type": "application/json", authorization: `Bearer ${router.key}` },
       body: JSON.stringify({
-        model: router.model(model),
-        messages: [{ role: "user", content: prompt.text }],
+        model: sentAs,
+        messages: prompt.messages ?? [{ role: "user", content: prompt.text }],
+        ...(prompt.tools && { tools: prompt.tools }),
         stream: true,
         stream_options: { include_usage: true },
         ...router.extra,
       }),
     });
-    if (!res.ok) return { ...sample, ok: false, error: `answered ${res.status}` };
+    if (!res.ok) return { ...sample, ok: false, kind: res.status >= 500 ? "http_5xx" : "http_4xx", error: `answered ${res.status}` };
+    const failovers = Math.max(0, Number(res.headers.get("x-si-marketplace-attempts") ?? 1) - 1) || 0;
     const decoder = new TextDecoder();
     let buffer = "";
     let done = false;
@@ -1049,42 +1240,126 @@ async function benchOne(router, model, prompt, waitMs) {
         const event = parseEvent(line);
         if (event === "done") done = true;
         if (!event || event === "done") continue;
-        const piece = event.choices?.[0]?.delta?.content;
-        if (piece) {
+        if (event.model) served = event.model;
+        const choice = event.choices?.[0];
+        if (choice?.delta?.content) {
           ttft ??= performance.now() - started;
-          text += piece;
+          text += choice.delta.content;
         }
+        for (const piece of choice?.delta?.tool_calls ?? []) {
+          ttft ??= performance.now() - started;
+          const call = (calls[piece.index ?? 0] ??= { name: "", arguments: "" });
+          call.name += piece.function?.name ?? "";
+          call.arguments += piece.function?.arguments ?? "";
+        }
+        if (choice?.finish_reason) finish = choice.finish_reason;
         if (event.usage) usage = event.usage;
       }
       if (done) break;
     }
     const totalMs = performance.now() - started;
-    if (!text) return { ...sample, ok: false, error: "no text" };
+    const toolCalls = calls.filter(Boolean);
+    const measured = { servedModel: served, failovers, ttftMs: ttft == null ? null : Math.round(ttft), totalMs: Math.round(totalMs) };
+    if (!text && toolCalls.length === 0) return { ...sample, ...measured, ok: false, kind: "empty", error: "no text" };
+    if (!finish && !done) return { ...sample, ...measured, ok: false, kind: "dropped", error: "ended with no finish marker" };
+    if (finish === "length") return { ...sample, ...measured, ok: false, kind: "truncated", error: "cut off at the length limit" };
+    const badCall = toolCalls.some((c) => {
+      try {
+        JSON.parse(c.arguments || "{}");
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (badCall) return { ...sample, ...measured, ok: false, kind: "tool_parse", error: "tool call arguments were not valid JSON" };
     return {
       ...sample,
+      ...measured,
       ok: true,
-      pass: prompt.expect.test(text),
-      ttftMs: Math.round(ttft),
-      totalMs: Math.round(totalMs),
+      pass: prompt.check ? prompt.check(text, toolCalls) : prompt.expect.test(text),
       inTokens: usage?.prompt_tokens ?? null,
       outTokens: usage?.completion_tokens ?? null,
-      ...costOf(router, model, usage),
+      cachedTokens: usage?.prompt_tokens_details?.cached_tokens ?? usage?.cached_tokens ?? null,
+      ...costOf(router, sentAs, usage),
     };
   } catch (err) {
-    return { ...sample, ok: false, error: err.name === "TimeoutError" ? `no answer in ${waitMs / 1000} s` : "connection failed" };
+    const timedOut = err.name === "TimeoutError" || err.name === "AbortError";
+    if (timedOut) return { ...sample, ok: false, kind: "timeout", error: `no answer in ${waitMs / 1000} s` };
+    return { ...sample, ok: false, kind: "dropped", error: text ? "connection dropped mid-answer" : "connection failed" };
   }
 }
 
+// One request, tried again once if it failed before giving any answer. The
+// retry is counted on the sample, and a request that fails both times still
+// counts as one failure.
+async function benchOne(router, model, sentAs, prompt, waitMs) {
+  const first = await benchOnce(router, model, sentAs, prompt, waitMs);
+  const worthRetrying = !first.ok && (first.kind === "http_5xx" || first.error === "connection failed");
+  if (!worthRetrying) return first;
+  return { ...(await benchOnce(router, model, sentAs, prompt, waitMs)), retries: 1 };
+}
+
+// Prompts from a file, one JSON object per line: { id, type, text or
+// messages, expect }. `expect` is a pattern the reply must match.
+function loadPrompts(file) {
+  return readFileSync(file, "utf8")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line, i) => {
+      const p = JSON.parse(line);
+      if (!p.expect || !(p.text || p.messages)) fail(`${file} line ${i + 1}: each prompt needs "expect" and "text" or "messages".`);
+      return { id: p.id ?? `prompt-${i + 1}`, type: p.type ?? "custom", text: p.text, messages: p.messages, expect: new RegExp(p.expect, "i") };
+    });
+}
+
+// Saved results: JSONL (one request per line), or the older { samples } file.
+function loadSamples(file) {
+  const text = readFileSync(file, "utf8").trim();
+  if (text.startsWith("{") && !text.includes("\n{")) {
+    try {
+      const data = JSON.parse(text);
+      if (data.samples) return { samples: data.samples, note: data.note };
+    } catch {
+      // not one JSON document: read it as JSONL below
+    }
+  }
+  return { samples: text.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)), note: null };
+}
+
+const BENCH_HELP = `${NAME} bench: the same prompts through Surplus, OpenRouter and Router by Ramp
+
+  ${NAME} bench --live [-m models]     send real requests (costs money, see below)
+  ${NAME} bench --fixture <file>       replay saved results: no keys, no network
+
+  -m a,b            models to test, by Surplus's names. "-m shortlist" is the
+                    eight-model list in the README. Default: ${DEFAULT_MODEL}
+  --quick           three one-line prompts instead of the full set of ten
+  --prompts <file>  your own prompts, one JSON object per line:
+                    {"id": "...", "type": "...", "text": "...", "expect": "pattern"}
+  --runs <n>        repeat every prompt n times (1 to 5, default 1)
+  --wait <seconds>  give up on a request after this long (default 60)
+  --out <file>      write one JSON line per request (replay it with --fixture)
+  --json            print the summary as JSON instead of tables
+
+  Keys: SURPLUS_API_KEY (or your login), OPENROUTER_API_KEY, RAMP_ROUTER_API_KEY.
+  A router with no key is skipped. A model a router does not list is skipped.
+  The full set on one cheap model costs about a cent; on a frontier model,
+  tens of cents. PLUS_SPEND_CAP=<dollars> stops a run before it starts.
+`;
+
 async function bench(flags) {
+  if (flags.help) return console.log(BENCH_HELP);
   let samples;
   let note = null;
   const skipped = [];
   if (flags.fixture) {
-    const data = JSON.parse(readFileSync(flags.fixture, "utf8"));
-    samples = data.samples ?? data;
-    note = data.note ?? `Replayed from ${flags.fixture}.`;
+    const loaded = loadSamples(flags.fixture);
+    samples = loaded.samples;
+    note = loaded.note ?? `Replayed from ${flags.fixture}.`;
   } else if (flags.live) {
-    const models = (flags.model ?? DEFAULT_MODEL).split(",").map((m) => m.trim()).filter(Boolean);
+    const asked = flags.model ?? DEFAULT_MODEL;
+    const models = asked === "shortlist" ? BENCH_MODELS : asked.split(",").map((m) => m.trim()).filter(Boolean);
+    const prompts = flags.prompts ? loadPrompts(flags.prompts) : flags.quick ? BENCH_PROMPTS : BENCH_SET;
     const runs = Math.max(1, Math.min(Number(flags.runs ?? 1) || 1, 5));
     const waitMs = (Number(flags.wait ?? 60) || 60) * 1000;
     const routers = benchRouters().filter((r) => {
@@ -1094,51 +1369,85 @@ async function bench(flags) {
     });
     if (routers.length === 0) fail("No router has a key. Set SURPLUS_API_KEY, OPENROUTER_API_KEY, or RAMP_ROUTER_API_KEY.");
     checkSpendCap();
-    for (const r of routers) if (r.priceFromCatalog) r.prices = await catalogPrices(r);
+    for (const r of routers) r.catalog = await catalog(r);
     // Routers run side by side; within a router, one request at a time, so
     // they do not slow each other down.
     const perRouter = await Promise.all(
       routers.map(async (router) => {
         const out = [];
-        for (let i = 0; i < runs; i++)
-          for (const model of models) for (const prompt of BENCH_PROMPTS) out.push(await benchOne(router, model, prompt, waitMs));
+        for (const model of models) {
+          const sentAs = routerModel(router, model);
+          if (!sentAs) {
+            out.push({ router: router.name, model, skipped: "not listed by this router" });
+            continue;
+          }
+          for (let i = 0; i < runs; i++) for (const prompt of prompts) out.push(await benchOne(router, model, sentAs, prompt, waitMs));
+        }
         return out;
       }),
     );
     samples = perRouter.flat();
     addSpend(samples.reduce((sum, x) => sum + (x.costUsd || 0), 0));
-    note = `Live run, ${new Date().toISOString()}. ${BENCH_PROMPTS.length} prompts x ${runs} run(s) per model per router.`;
+    note = `Live run, ${new Date().toISOString()}. ${prompts.length} prompts x ${runs} run(s) per model per router.`;
     if (flags.save) writeFileSync(flags.save, JSON.stringify({ note, samples }, null, 2));
   } else {
     fail(
-      `bench needs a source.\n  ${NAME} bench --fixture <file>      replay saved results: no keys, no network\n  ${NAME} bench --live [-m models]    send real requests to every router you have a key for (costs a little)`,
+      `bench needs a source.\n  ${NAME} bench --fixture <file>      replay saved results: no keys, no network\n  ${NAME} bench --live [-m models]    send real requests to every router you have a key for (costs a little)\n  ${NAME} bench --help                every flag`,
     );
   }
+  if (flags.out) writeFileSync(flags.out, samples.map((s) => JSON.stringify(s)).join("\n") + "\n");
 
   const rows = benchSummary(samples);
-  if (flags.json) return console.log(JSON.stringify(rows, null, 2));
+  const skips = samples.filter((s) => s.skipped);
+  if (flags.json) return console.log(JSON.stringify({ rows, skips }, null, 2));
   const pct = (v) => (v == null ? "" : `${Math.round(v * 100)}%`);
-  const money = (v) => (v == null ? "not reported" : usd(v));
+  const secs = (ms) => (ms == null ? "" : `${(ms / 1000).toFixed(1)} s`);
   console.log(note + "\n");
   console.log(
     table([
-      ["ROUTER", "MODEL", "ERRORS", "QUALITY", "FIRST TOKEN", "TOKENS/S", "$ PER 1M TOKENS", "COST"],
+      ["ROUTER", "MODEL", "FAILED", "QUALITY", "FIRST TOKEN P50", "P95", "TOKENS/S P50", "P95"],
       ...rows.map((r) => [
         r.router,
         r.model,
-        `${pct(r.errorRate)} of ${r.attempts}`,
+        `${r.failures} of ${r.attempts}`,
         pct(r.quality),
-        r.ttftMs == null ? "" : `${(r.ttftMs / 1000).toFixed(1)} s`,
+        secs(r.ttftP50Ms ?? r.ttftMs),
+        secs(r.ttftP95Ms),
         r.tokensPerSecond == null ? (r.ttftMs == null ? "" : "one burst") : Math.round(r.tokensPerSecond),
-        r.perMillionTokensUsd == null ? "" : usd(r.perMillionTokensUsd),
-        money(r.costUsd),
+        r.tokensPerSecondP95 == null ? "" : Math.round(r.tokensPerSecondP95),
       ]),
     ]),
   );
-  for (const r of rows) if (r.errors.length) console.log(`${r.router} ${r.model}: ${Math.round(r.errorRate * r.attempts)} failed (${r.errors.join("; ")})`);
-  for (const r of rows) if (r.costSource === "catalog") console.log(`${r.router} ${r.model}: cost priced from its model list, since its replies do not report one`);
+  console.log(
+    "\n" +
+      table([
+        ["ROUTER", "MODEL", "COST", "$ PER 1M TOKENS", "VS LIST", "CACHED INPUT"],
+        ...rows.map((r) => [
+          r.router,
+          r.model,
+          r.costUsd == null ? "not reported" : usd(r.costUsd),
+          r.perMillionTokensUsd == null ? "" : usd(r.perMillionTokensUsd),
+          r.vsListPct == null ? "" : `${r.vsListPct > 0 ? "+" : ""}${r.vsListPct}%`,
+          r.cacheSharePct == null ? "" : `${r.cacheSharePct}%`,
+        ]),
+      ]),
+  );
+  const types = [...new Set(rows.flatMap((r) => Object.keys(r.byType ?? {})))];
+  if (types.length > 1) {
+    const cell = (t) => (t ? `${t.pass}/${t.of}` : "");
+    console.log("\nCorrect answers by kind of prompt:\n" + table([["ROUTER", "MODEL", ...types.map((t) => t.toUpperCase())], ...rows.map((r) => [r.router, r.model, ...types.map((t) => cell(r.byType[t]))])]));
+  }
+  console.log();
+  for (const r of rows) {
+    if (r.failures) console.log(`${r.router} ${r.model}: ${r.failures} failed (${Object.keys(r.failureKinds).join(", ")}: ${r.errors.join("; ")})`);
+    if (r.retries) console.log(`${r.router} ${r.model}: ${r.retries} request(s) retried once`);
+    if (r.failovers) console.log(`${r.router} ${r.model}: ${r.failovers} seller change(s) inside the router`);
+    if (r.costSource === "catalog") console.log(`${r.router} ${r.model}: cost priced from its model list, since its replies do not report one`);
+  }
+  for (const s of skips) console.log(`${s.router} ${s.model}: skipped, ${s.skipped}`);
   for (const name of skipped) console.log(`${name}: skipped, no key`);
-  console.log("\nCost includes OpenRouter's 5.5% credit fee. Quality is the share of answers matching the expected reply.");
+  console.log("\nCost includes OpenRouter's 5.5% credit fee. VS LIST compares it with the router's own list price for the same tokens.");
+  console.log("Quality is the share of answers that pass a fixed check: unit tests for code, the tool call for tool use, required markup for web pages, an exact value for long context.");
 }
 
 // ---- entry point ----
@@ -1205,9 +1514,13 @@ async function main() {
       save: { type: "string" },
       runs: { type: "string" },
       print: { type: "boolean" },
+      quick: { type: "boolean" },
+      out: { type: "string" },
+      prompts: { type: "string" },
     },
   });
   const [command, ...rest] = positionals;
+  if (values.help && command === "bench") return bench(values);
   if (values.help || !command) return console.log(HELP);
   if (command === "signup") return signup(values);
   if (command === "login") return login(values);

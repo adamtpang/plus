@@ -28,7 +28,7 @@ const server = createServer(async (req, res) => {
       .writeHead(200, { "content-type": "application/json" })
       .end(JSON.stringify({ data: [{ id: "gpt-4o-mini", router: { pricing: { input: "1", output: "2" } } }] }));
   }
-  if (req.url.endsWith("/models/" + body.model) || req.url.includes("/models/")) return res.writeHead(404).end();
+  if (req.url.includes("/models")) return res.writeHead(404).end(); // no model list: names are guessed
   if (req.headers.authorization !== `Bearer ${KEYS[router]}`) return res.writeHead(401).end("{}");
 
   const prompt = body.messages[0].content;
@@ -88,7 +88,7 @@ test("--fixture works with no keys and no network", async () => {
 test("--fixture --json prints the summary as data", async () => {
   const r = await cli(["--fixture", "cli/bench-fixture.json", "--json"], offline);
   assert.equal(r.code, 0, r.stderr);
-  const rows = JSON.parse(r.stdout);
+  const { rows } = JSON.parse(r.stdout);
   assert.equal(rows.length, 3);
 });
 
@@ -110,9 +110,9 @@ test("--live measures every router that has a key, and never prints a key", asyn
     RAMP_ROUTER_BASE_URL: `${base}/ramp/v1`,
   };
   const saved = join(home, "run.json");
-  const r = await cli(["--live", "-m", "gpt-4o-mini", "--save", saved, "--json"], env);
+  const r = await cli(["--live", "--quick", "-m", "gpt-4o-mini", "--save", saved, "--json"], env);
   assert.equal(r.code, 0, r.stderr);
-  const rows = JSON.parse(r.stdout);
+  const { rows } = JSON.parse(r.stdout);
   const by = (name) => rows.find((x) => x.router === name);
   assert.equal(by("surplus").errorRate, 0);
   assert.ok(Math.abs(by("surplus").costUsd - 4e-6 * BENCH_PROMPTS.length) < 1e-12);
@@ -133,14 +133,14 @@ test("--live measures every router that has a key, and never prints a key", asyn
 
 test("--live says why a router failed", async () => {
   const env = { ...offline, SURPLUS_API_KEY: "inf_refused", SURPLUS_BASE_URL: `${base}/surplus` };
-  const r = await cli(["--live", "-m", "gpt-4o-mini"], env);
+  const r = await cli(["--live", "--quick", "-m", "gpt-4o-mini"], env);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /surplus gpt-4o-mini: .*answered 401/);
 });
 
 test("--live skips a router with no key and says so", async () => {
   const env = { ...offline, SURPLUS_API_KEY: KEYS.surplus, SURPLUS_BASE_URL: `${base}/surplus` };
-  const r = await cli(["--live", "-m", "gpt-4o-mini"], env);
+  const r = await cli(["--live", "--quick", "-m", "gpt-4o-mini"], env);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /openrouter.*no key/i);
   assert.match(r.stdout, /ramp.*no key/i);
