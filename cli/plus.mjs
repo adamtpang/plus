@@ -26,7 +26,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.5.0"; // kept equal to package.json by a test
+const VERSION = "0.5.1"; // kept equal to package.json by a test
 // What `-m auto` means: a cheap open-weight model. Surplus exposes no
 // "official" or compliance flag on its offers, so there is nothing to filter
 // on; Surplus itself picks the cheapest healthy seller for the model.
@@ -191,6 +191,20 @@ async function api(path, key = apiKey(), body, timeoutMs) {
   const res = await fetch(BASE + path, { ...(post || { headers }), signal });
   if (!res.ok) fail(`${path} answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res.json();
+}
+
+// What a router said when it refused a request: its status, its error code
+// and its message, without the surrounding JSON. Routers explain themselves
+// in the body, and a bare "404" hides the reason.
+export function refusal(status, bodyText) {
+  try {
+    const err = JSON.parse(bodyText).error ?? {};
+    const code = typeof err === "string" ? null : err.code;
+    const message = typeof err === "string" ? err : err.message;
+    return [`${status}${code ? `, ${code}` : ""}`, message].filter(Boolean).join(": ").slice(0, 600);
+  } catch {
+    return `${status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ""}`;
+  }
 }
 
 // Stop with a message. It throws rather than exiting on the spot, so open
@@ -641,7 +655,7 @@ async function ask(prompt, flags) { // prompt may gain piped text below
       }),
     });
     if (!res.ok) {
-      const message = `chat answered ${res.status}: ${(await res.text()).slice(0, 300)}`;
+      const message = `Surplus refused the request (${refusal(res.status, await res.text())})`;
       if (res.status >= 500) throw retryable(message);
       fail(message);
     }
@@ -1160,9 +1174,11 @@ export function benchSummary(samples) {
     for (const s of failed) failureKinds[s.kind ?? "error"] = (failureKinds[s.kind ?? "error"] ?? 0) + 1;
     const byType = {};
     for (const s of group) {
+      // Only answered requests count: one that failed was not answered wrongly.
       const t = (byType[s.type ?? "quick"] ??= { pass: 0, of: 0 });
+      if (!s.ok) continue;
       t.of++;
-      if (s.ok && s.pass) t.pass++;
+      if (s.pass) t.pass++;
     }
     return {
       router,
@@ -1227,7 +1243,10 @@ async function benchOnce(router, model, sentAs, prompt, waitMs) {
         ...router.extra,
       }),
     });
-    if (!res.ok) return { ...sample, ok: false, kind: res.status >= 500 ? "http_5xx" : "http_4xx", error: `answered ${res.status}` };
+    if (!res.ok) {
+      const why = refusal(res.status, await res.text().catch(() => "")).split(": ")[0]; // status and code, not the long message
+      return { ...sample, ok: false, kind: res.status >= 500 ? "http_5xx" : "http_4xx", error: `answered ${why}` };
+    }
     const failovers = Math.max(0, Number(res.headers.get("x-si-marketplace-attempts") ?? 1) - 1) || 0;
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1434,8 +1453,8 @@ async function bench(flags) {
   );
   const types = [...new Set(rows.flatMap((r) => Object.keys(r.byType ?? {})))];
   if (types.length > 1) {
-    const cell = (t) => (t ? `${t.pass}/${t.of}` : "");
-    console.log("\nCorrect answers by kind of prompt:\n" + table([["ROUTER", "MODEL", ...types.map((t) => t.toUpperCase())], ...rows.map((r) => [r.router, r.model, ...types.map((t) => cell(r.byType[t]))])]));
+    const cell = (t) => (t?.of ? `${t.pass}/${t.of}` : "-");
+    console.log("\nCorrect answers by kind of prompt, out of those that got an answer:\n" + table([["ROUTER", "MODEL", ...types.map((t) => t.toUpperCase())], ...rows.map((r) => [r.router, r.model, ...types.map((t) => cell(r.byType[t]))])]));
   }
   console.log();
   for (const r of rows) {

@@ -1,6 +1,6 @@
 {
   "name": "plus",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "An unofficial CLI for Surplus Intelligence: any coding tool on Surplus, with a receipt after every answer.",
   "private": true,
   "license": "MIT",
