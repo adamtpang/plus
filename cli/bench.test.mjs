@@ -151,3 +151,10 @@ test("Ramp spells Claude versions with dashes", () => {
   assert.equal(rampModelName("gpt-4o-mini"), "gpt-4o-mini");
   assert.equal(rampModelName("deepseek-v4.1-flash"), "deepseek-v4.1-flash"); // only Claude names change
 });
+
+test("tokens per second is left blank when the answer arrived in one burst", () => {
+  const burst = { router: "surplus", model: "m", prompt: "math", ok: true, pass: true, ttftMs: 1000, totalMs: 1015, inTokens: 20, outTokens: 40, costUsd: 0.00001 };
+  assert.equal(benchSummary([burst])[0].tokensPerSecond, null);
+  // A real stream of the same answer still gets a rate.
+  assert.equal(benchSummary([{ ...burst, totalMs: 2000 }])[0].tokensPerSecond, 40);
+});

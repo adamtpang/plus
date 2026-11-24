@@ -11,6 +11,7 @@ import { launcher } from "./plus.mjs";
 
 const KEY = "inf_" + "cd34".repeat(8);
 const seen = [];
+let logCalls = 0; // the request log is empty the first time it is read, as the real one can be
 
 const server = createServer(async (req, res) => {
   let text = "";
@@ -25,7 +26,7 @@ const server = createServer(async (req, res) => {
   if (url.pathname === "/v1/payments/balance") return json(200, { credit_balance_usdc: "5000000", fiat_available_usdc: "5000000" });
   if (url.pathname === "/v1/buyer/savings") return json(200, { summary: { request_count: 3, total_saved_usdc: "900000" }, by_model: [] });
   if (url.pathname.startsWith("/v1/models/")) return json(200, { pricing: { prompt: "0.000001", completion: "0.00001" } });
-  if (url.pathname === "/v1/requests") return json(200, { items: [{ request_id: "req_1", provider: "acme-seller" }] });
+  if (url.pathname === "/v1/requests") return json(200, { items: logCalls++ === 0 ? [] : [{ request_id: "req_1", provider: "acme-seller" }] });
   if (url.pathname === "/v1/chat/completions") {
     const usage = { prompt_tokens: 5, completion_tokens: 7, buyer_cost_micro: body.model === "cheap" ? 2 : 20 };
     if (!body.stream) {
@@ -98,7 +99,8 @@ test("--version prints the version in package.json", async () => {
   assert.equal(stdout.trim(), version);
 });
 
-test("the receipt names the seller that served the answer", async () => {
+test("the receipt names the seller, even when the request log is a moment behind", async () => {
+  logCalls = 0;
   const { stdout } = await cli(["ask", "hi"]);
   assert.match(stdout, /Hello/);
   assert.match(stdout, /via acme-seller/);
