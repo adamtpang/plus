@@ -131,6 +131,41 @@ Keys are never printed or saved. Each router's model list is read first, so the 
 
 Limits worth knowing: one run is ten requests per model per router, so p95 is close to "the slowest one"; use `--runs 3` for more. The checks are strict and simple, and passing them shows a model handled ordinary work, not that it is the best model. Replies to coding prompts are run as code on your machine, in a sandbox with no files or network, which contains mistakes but is not a defence against code written to escape.
 
+### Eight models, one real run
+
+24 November 2026, one machine in the US: the ten built-in prompts, once each, on eight models through all three routers (`plus bench --live -m shortlist`). No minimum discount was set on the Surplus key, and it was limited to trusted sellers.
+
+Dollars per 1M tokens, as charged:
+
+| Model | Surplus | OpenRouter | Router by Ramp | Surplus against OpenRouter |
+|---|---|---|---|---|
+| claude-opus-5.5 | $2.41 | $4.99 | $4.76 | 52% less |
+| claude-sonnet-5.5 | $1.18 | $2.51 | $2.37 | 53% less |
+| gemini-4-carbon | $0.23 | $2.92 | $2.82 | 92% less |
+| kimi-k3 | $0.07 | $1.58 | $5.49 | 96% less |
+| glm-5.3 | $0.001 | $1.92 | $2.55 | over 99% less |
+| glm-5.3-flash | $0.006 | $0.17 | $0.21 | 97% less |
+| deepseek-v4.1-flash | $0.006 | $0.23 | $0.41 | 98% less |
+| mimo-v2.6-pro | $0.19 | $0.11 | not listed | 78% more |
+
+| | Surplus | OpenRouter | Router by Ramp |
+|---|---|---|---|
+| Requests that failed | 0 of 80 | 0 of 80 | 1 of 70 (a 120 second timeout) |
+| Answers that passed their check | 79 of 80 | 80 of 80 | 69 of 69 |
+| Time to first token, p50, by model | 1.2 to 4.6 s | 0.6 to 6.8 s | 0.7 to 5.1 s |
+
+What it shows, and what it does not:
+
+- **Surplus answered every request and was at least 50% cheaper than OpenRouter on seven of the eight models.**
+- **It was not the cheapest on every model.** On mimo-v2.6-pro OpenRouter cost less, because 94% of its input was served from cache.
+- **It was slower to the first token on most models**, about 1.5 to 2.5 times OpenRouter. It was close on Claude Opus and faster on Gemini.
+- **One Surplus answer was wrong:** glm-5.3-flash missed one long-context prompt. One miss in 80 is not a pattern.
+- Some Surplus prices are far below list (glm-5.3 at a tenth of a cent per 1M tokens). They are what was charged on the day; they move with its market and may not last.
+- Ramp's figures are its list prices, because its replies report no cost. That gives it no credit for cache discounts.
+- Ten requests per model per router, from one place on one day. Rerun it before quoting it.
+
+An earlier run of the same list, with a 50% minimum discount set on the Surplus key, gave the same prices on six models and refused 16 of 80 requests (`minimum_discount_not_met`) on the other two. The minimum caused refusals; it did not change the prices.
+
 ### The full set, one real run
 
 24 November 2026, one machine in the US, the ten built-in prompts once each.
