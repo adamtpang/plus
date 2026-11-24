@@ -13,7 +13,7 @@ It does three things:
 A keep-alive in streaming is a mechanism used to maintain an active
 connection between a client and server by sending periodic signals...
 
-· gpt-4o-mini · first token 1.1 s · total 1.8 s · 36 tokens
+· gpt-4o-mini via openai · first token 1.1 s · total 1.8 s · 36 tokens
 · cost $0.0000010 · list $0.000025, saved 96%
 ```
 
@@ -56,12 +56,21 @@ plus ask "hello"
 | `plus topup <dollars>` | Add credit by card. Opens a Stripe page, then waits for the credit |
 | `plus topup --usdc` | Where to send USDC instead |
 | `plus ask "question" [-m model]` | Stream an answer, then show its cost against list price |
+| `plus compare "question" -m a,b` | Ask several models at once: time, cost, list price and saving side by side |
 | `plus claude [arguments]` | Start Claude Code running on Surplus |
+| `plus codex [arguments]` | Start Codex running on Surplus |
+| `plus opencode [arguments]` | Start OpenCode running on Surplus |
+| `plus aider [arguments]` | Start aider running on Surplus |
 | `plus run <program> [arguments]` | Start any other tool pointed at Surplus |
 | `plus price <model>` | The cheapest live sellers for a model, against its list price |
 | `plus balance` | Credit left, and what you have saved so far |
 | `plus savings` | What you saved, model by model |
 | `plus logs` | Your recent requests: cost, list price and wait |
+| `plus bench` | Surplus, OpenRouter and Router by Ramp on the same prompts (see below) |
+| `plus doctor` | Check your setup, one thing at a time |
+| `plus update` | Install the latest version |
+
+`balance`, `savings`, `price`, `logs`, `compare` and `bench` take `--json` for scripts. `plus ask "Summarise:" --stdin` adds piped text to the question.
 
 Launchers take `--model` as their first argument, for example `plus claude --model glm-5.3` or `plus codex --model gpt-5-mini`. Before a tool starts, `plus` checks your key with Surplus and stops with a clear message if it is refused. `plus update` installs the latest version. How this compares with OpenRouter's Ori, feature by feature: [PARITY.md](PARITY.md).
 
@@ -92,6 +101,31 @@ plus bench --live --save run.json                    # keep a run, replay it lat
 
 Keys are never printed or saved. Three prompts are a quick reading, not a benchmark: use `--runs 3` for more samples. OpenRouter model names get a vendor prefix guessed from the name (`gpt-4o-mini` becomes `openai/gpt-4o-mini`).
 
+### One real run
+
+24 November 2026, from one machine in the US: three prompts, twice each, per model per router. Every answer from every router was correct, and no request failed except where noted.
+
+| Model | Surplus | OpenRouter | Router by Ramp |
+|---|---|---|---|
+| gpt-4o-mini | $0.039 | $0.203 | $0.210 |
+| claude-sonnet-4.5 | $2.82 | $6.00 | refused |
+| deepseek-v4-flash | $0.095 | $0.201 | $0.155 |
+
+Dollars per 1M tokens (input and output blended), as charged. OpenRouter includes its 5.5% credit fee. Ramp is priced from its own model list.
+
+| Time to first token | Surplus | OpenRouter | Router by Ramp |
+|---|---|---|---|
+| gpt-4o-mini | 1.3 s | 0.6 s | 0.6 s |
+| claude-sonnet-4.5 | 1.5 s | 1.1 s | refused |
+| deepseek-v4-flash | 2.0 s | 0.7 s | 0.7 s |
+
+Read it with care:
+
+- **Surplus was 52% to 81% cheaper than OpenRouter per token, and 1.4 to 3 times slower to the first token.**
+- It is six short requests per cell. Prices on Surplus move with its market, and a model can be unavailable: two days earlier, every claude-sonnet-4.5 request on Surplus failed.
+- Ramp refused Claude because of a US data residency setting on the test account, not a fault in Ramp.
+- Run it yourself before trusting it: `plus bench --live`.
+
 ## How sign-up works
 
 A Surplus account is a wallet. `plus signup` makes a new private key on your machine, signs Surplus's sign-in message with it, and swaps the signature for an API key. The signing code is in `cli/wallet.mjs`, written without dependencies and checked against published test values.
@@ -100,7 +134,8 @@ A Surplus account is a wallet. `plus signup` makes a new private key on your mac
 
 - **Secrets are stored as plain text** in `~/.plus/config.json`: your API key, and the wallet's private key if you used `plus signup`. Back that file up and keep it private. See `SECURITY.md`.
 - **Sign-up has been tested against a stand-in server and against Surplus up to the last step.** No real account has been made with it yet.
-- **`plus run` was tested with Claude Code only.** Other tools depend on how each one reads its settings.
+- **The four named launchers were each run for real on Surplus** on 24 November 2026 (Windows): Claude Code, Codex, aider and OpenCode each started and got an answer from a Surplus model. Other tools through `plus run` depend on how each one reads its settings.
+- **The seller on the receipt is looked up afterwards** in your request log, which trails by a second or two. If it is not there within about three seconds, the receipt leaves it out.
 - **The signing code is hand-written.** It is fine for signing one login on your own machine. It makes no attempt to run in constant time, so do not reuse it on a server.
 - **No telemetry.** The tool talks to Surplus and to nothing else.
 

@@ -6,7 +6,7 @@ Ori is OpenRouter's CLI (closed source). `plus` aims for the same everyday exper
 |---|---|---|
 | One-line install | `curl ... \| bash` | Yes, Mac, Linux and Windows |
 | `ori login` | Sign in with OpenRouter (OAuth) | `plus login` takes a key; `plus signup` makes an account from the terminal. Surplus has no OAuth to sign in with |
-| `ori claude`, `codex`, `opencode` | Launch the tool on OpenRouter | Yes, plus `aider` |
+| `ori claude`, `codex`, `opencode` | Launch the tool on OpenRouter | Yes, plus `aider`. All four run for real on Surplus, 24 Nov 2026 |
 | `ori hermes`, `pi`, `cline`, `kilo`, `crush`, `droid`, `grok`, `omp` and more | More launchers | Not yet. Each is added only after it is tested for real. `plus run <tool>` covers tools that read the standard OpenAI or Anthropic settings |
 | `--model` on any launcher | Pick the model | Yes, `plus claude --model <id>` and the same for each launcher |
 | Offers to install a missing tool | | Says how to install it |

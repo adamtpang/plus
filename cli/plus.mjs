@@ -25,7 +25,7 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.3.0"; // kept equal to package.json by a test
+const VERSION = "0.3.1"; // kept equal to package.json by a test
 
 // ---- small helpers, exported for the tests ----
 
