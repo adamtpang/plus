@@ -62,17 +62,27 @@ plus ask "hello"
 | `plus opencode [arguments]` | Start OpenCode running on Surplus |
 | `plus aider [arguments]` | Start aider running on Surplus |
 | `plus run <program> [arguments]` | Start any other tool pointed at Surplus |
+| `plus run --print-env` | The settings it uses (never the key), and how Cursor, Kilo, Cline and Roo take them |
 | `plus price <model>` | The cheapest live sellers for a model, against its list price |
 | `plus balance` | Credit left, and what you have saved so far |
 | `plus savings` | What you saved, model by model |
 | `plus logs` | Your recent requests: cost, list price and wait |
 | `plus bench` | Surplus, OpenRouter and Router by Ramp on the same prompts (see below) |
+| `plus models` | A short list of models: Surplus's cheapest live price next to an Arena quality score |
 | `plus doctor` | Check your setup, one thing at a time |
 | `plus update` | Install the latest version |
 
 `balance`, `savings`, `price`, `logs`, `compare` and `bench` take `--json` for scripts. `plus ask "Summarise:" --stdin` adds piped text to the question.
 
 Launchers take `--model` as their first argument, for example `plus claude --model glm-5.3` or `plus codex --model gpt-5-mini`. Before a tool starts, `plus` checks your key with Surplus and stops with a clear message if it is refused. `plus update` installs the latest version. How this compares with OpenRouter's Ori, feature by feature: [PARITY.md](PARITY.md).
+
+## Cheap by default, and careful with money
+
+- **`plus ask "question" -m auto`** uses a cheap open-weight model, currently `glm-5.3-flash`, and the receipt says `auto -> glm-5.3-flash`. Surplus does not tag offers as official or compliant, so `auto` cannot filter on that; Surplus picks the cheapest healthy seller.
+- **Retries.** If a request fails with a server error, or the connection dies before any of the answer arrives, `plus ask` tries up to two more times and the receipt says so. Once text has started printing it does not retry, so you never see an answer twice.
+- **Spend cap.** `PLUS_SPEND_CAP=0.50 plus ask ...` (dollars per day, or `spendCap` in the config file) stops `ask`, `compare` and `bench --live` once the day's spending reaches it, and the receipt shows `spent today $x of $y`. It counts what `plus` itself spent on this machine, not tools started with `plus claude`.
+- **`plus savings`** also shows what OpenRouter lists for the same tokens, or `unknown` when it lists no such model.
+- **`plus models`** uses Text Arena scores read from arena.ai on 22 November 2026 and frozen in the code. Four of the eight models had no score on that page and say so.
 
 `plus ask` gives up after 90 seconds of silence (`--wait` changes it) and says so when an answer is cut off, instead of hanging.
 

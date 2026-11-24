@@ -17,7 +17,7 @@ Ori is OpenRouter's CLI (closed source). `plus` aims for the same everyday exper
 | Cost shown | Tokens and cost | Yes, plus list price and percent saved on every answer |
 | `ori harness setup` / `reset` | Write settings into the tool's own config, so its desktop app works too | Not yet |
 | `ori alias` | Make plain `claude` run through Ori | Not yet |
-| Spend limit (`ORI_KEY_LIMIT`) | Cap what a key can spend | Not yet. Surplus budgets need a management key |
+| Spend limit (`ORI_KEY_LIMIT`) | Cap what a key can spend | Partial: `PLUS_SPEND_CAP` limits what `plus` itself spends per day on one machine. A limit on the key itself needs a Surplus management key |
 | Organisation policies | Admin-set rules | No |
 | Ori Code, Slack interns, Mac app | Its own agent and apps | No, by choice |
 
