@@ -25,7 +25,13 @@ const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 // an earlier login keeps working; new saves go to CONFIG_FILE.
 const OLD_CONFIG_FILE = join(homedir(), ".surplusminus", "config.json");
 const DEFAULT_MODEL = "gpt-4o-mini";
-const VERSION = "0.3.1"; // kept equal to package.json by a test
+const VERSION = "0.4.0"; // kept equal to package.json by a test
+// What `-m auto` means: a cheap open-weight model. Surplus exposes no
+// "official" or compliance flag on its offers, so there is nothing to filter
+// on; Surplus itself picks the cheapest healthy seller for the model.
+export const AUTO_MODEL = "glm-5.3-flash";
+const MAX_RETRIES = 2;
+const SPEND_FILE = join(CONFIG_DIR, "spend.json");
 
 // ---- small helpers, exported for the tests ----
 
@@ -365,16 +371,119 @@ async function balance(flags = {}) {
 async function savings(flags = {}) {
   const saved = await api("/v1/buyer/savings?period=all_time");
   if (flags.json) return console.log(JSON.stringify(saved.by_model ?? []));
-  const rows = (saved.by_model ?? []).map((m) => [
-    m.model,
-    m.requests,
-    usd(dollars(m.spent)),
-    usd(dollars(m.direct_spent)),
-    usd(dollars(m.saved)),
-    `${Math.round(m.discount)}%`,
-  ]);
-  if (rows.length === 0) return console.log("No requests yet.");
-  console.log(table([["MODEL", "REQUESTS", "PAID", "LIST", "SAVED", "OFF"], ...rows]));
+  const models = saved.by_model ?? [];
+  if (models.length === 0) return console.log("No requests yet.");
+  const openrouter = await openRouterPrices();
+  const rows = models.map((m) => {
+    // What the same tokens would have cost at OpenRouter's listed price.
+    const p = openrouter[m.model];
+    const there = p ? p.prompt * (m.input_tokens ?? 0) + p.completion * (m.output_tokens ?? 0) : null;
+    return [
+      m.model,
+      m.requests,
+      usd(dollars(m.spent)),
+      usd(dollars(m.direct_spent)),
+      usd(dollars(m.saved)),
+      `${Math.round(m.discount)}%`,
+      there == null ? "unknown" : usd(there),
+      there == null ? "" : usd(Math.max(0, there - dollars(m.spent))),
+    ];
+  });
+  console.log(table([["MODEL", "REQUESTS", "PAID", "LIST", "SAVED", "OFF", "OPENROUTER LIST", "SAVED VS OPENROUTER"], ...rows]));
+  console.log("\nOpenRouter list is its public price for the same tokens, without its 5.5% credit fee or cache discounts. \"unknown\" means it lists no such model.");
+}
+
+// OpenRouter's public price list as { model: { prompt, completion } } in
+// dollars per token, keyed by the name without its "vendor/" prefix. Kept
+// for a day in the config folder. Empty when it cannot be fetched.
+async function openRouterPrices() {
+  const file = join(CONFIG_DIR, "openrouter-prices.json");
+  try {
+    const cached = JSON.parse(readFileSync(file, "utf8"));
+    if (Date.now() - cached.at < 24 * 3600 * 1000) return cached.prices;
+  } catch {
+    // no usable cache: fetch below
+  }
+  const url = process.env.OPENROUTER_MODELS_URL ?? "https://openrouter.ai/api/v1/models";
+  const res = await fetch(url, { signal: AbortSignal.timeout(8000) }).catch(() => null);
+  if (!res?.ok) return {};
+  const body = await res.json().catch(() => ({}));
+  const prices = {};
+  for (const m of body.data ?? []) {
+    if (!m.pricing) continue;
+    prices[m.id.split("/").pop()] = { prompt: Number(m.pricing.prompt) || 0, completion: Number(m.pricing.completion) || 0 };
+  }
+  try {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+    writeFileSync(file, JSON.stringify({ at: Date.now(), prices }));
+  } catch {
+    // a cache that cannot be written is not worth failing over
+  }
+  return prices;
+}
+
+// Text Arena scores (arena.ai, formerly LMArena), frozen here so `plus
+// models` needs no scraping. null means the model was not on the page when
+// it was read. To refresh: open https://arena.ai/leaderboard/chat/text (or
+// the dataset at huggingface.co/datasets/lmarena-ai/leaderboard-dataset),
+// copy the Text scores, and change the date.
+export const ARENA = {
+  date: "2026-11-22",
+  models: {
+    "gemini-4-carbon": 1527,
+    "claude-opus-5.5": 1507,
+    "mimo-v2.6-pro": 1481,
+    "glm-5.3-flash": 1476,
+    "claude-sonnet-5.5": null,
+    "kimi-k3": null,
+    "glm-5.3": null,
+    "deepseek-v4.1-flash": null,
+  },
+};
+
+// A short list of models: Surplus's best live price next to a quality score.
+async function models(flags = {}) {
+  const rows = await Promise.all(
+    Object.entries(ARENA.models).map(async ([id, score]) => {
+      const market = await api(`/api/markets/${encodeURIComponent(id)}`, undefined, undefined, 8000).catch(() => null);
+      const best = (market?.offers ?? []).find((o) => o.available && o.healthy);
+      const input = best ? dollars(best.price_input_per_1m) : null;
+      const output = best ? dollars(best.price_output_per_1m) : null;
+      // Three parts input to one part output, a usual mix for coding work.
+      const blended = best ? (3 * input + output) / 4 : null;
+      return { model: id, input, output, score, perThousandPoints: blended != null && score ? (blended / score) * 1000 : null };
+    }),
+  );
+  if (flags.json) return console.log(JSON.stringify({ arena_date: ARENA.date, models: rows }, null, 2));
+  const money = (v) => (v == null ? "no offer" : usd(v));
+  console.log(
+    table([
+      ["MODEL", "INPUT $/1M", "OUTPUT $/1M", "ARENA TEXT", "$ PER 1000 POINTS"],
+      ...rows.map((r) => [r.model, money(r.input), money(r.output), r.score ?? "no score", r.perThousandPoints == null ? "" : usd(r.perThousandPoints)]),
+    ]),
+  );
+  console.log(`\nPrices are Surplus's cheapest live offer right now. Arena Text scores were read from arena.ai on ${ARENA.date}.`);
+  console.log("$ per 1000 points is the blended price (3 parts input, 1 part output) per 1M tokens, divided by the score: lower is more quality per dollar.");
+  console.log(`\n-m auto uses ${AUTO_MODEL}. Surplus does not tag offers as official or compliant, so auto cannot filter on that.`);
+}
+
+// The settings that point a tool at Surplus, by name. The key is never shown.
+function printEnv() {
+  const env = surplusEnv("(your Surplus key)");
+  console.log(table(Object.entries(env).map(([name, value]) => [name, value === "" ? "(empty on purpose)" : value])));
+  console.log(`
+${NAME} run <program> sets these and starts the program. Nothing is written to any config file.
+
+  Claude Code   ${NAME} claude            reads the ANTHROPIC_* names
+  Codex         ${NAME} codex             set through its own -c flags
+  OpenCode      ${NAME} opencode
+  aider         ${NAME} aider             reads OPENAI_API_BASE and OPENAI_API_KEY
+  Kilo, Cline, Roo   editor extensions: choose "OpenAI Compatible" in the extension's
+                provider settings and enter the OPENAI_BASE_URL above and your key
+  Cursor        Settings, Models: turn on "Override OpenAI Base URL", enter the
+                OPENAI_BASE_URL above and your key
+
+The Kilo and Cursor steps are from each tool's own settings screens and have not been run by this project.`);
 }
 
 // The cheapest sellers for one model right now, against its list price.
@@ -418,6 +527,43 @@ async function logs(flags) {
   console.log(table([["WHEN (UTC)", "MODEL", "STATUS", "OUT", "PAID", "LIST", "FIRST BYTE"], ...rows]));
 }
 
+// ---- spend cap ----
+// PLUS_SPEND_CAP (dollars), or "spendCap" in the config file, limits what
+// `ask`, `compare` and `bench --live` may spend per day on this machine. It
+// counts what plus itself spent; tools started with `plus claude` are not
+// counted. Returns null when no cap is set.
+function spendCap() {
+  const raw = process.env.PLUS_SPEND_CAP || readConfig().spendCap;
+  if (raw == null || raw === "") return null;
+  const cap = Number(raw);
+  return Number.isFinite(cap) && cap >= 0 ? cap : null;
+}
+const today = () => new Date().toISOString().slice(0, 10);
+function spentToday() {
+  try {
+    const saved = JSON.parse(readFileSync(SPEND_FILE, "utf8"));
+    return saved.date === today() ? Number(saved.usd) || 0 : 0;
+  } catch {
+    return 0;
+  }
+}
+// Stop before a paid request once the day's spending has reached the cap.
+function checkSpendCap() {
+  const cap = spendCap();
+  if (cap != null && spentToday() >= cap) {
+    fail(`spend cap reached: ${usd(spentToday())} spent today of a ${usd(cap)} cap. Raise PLUS_SPEND_CAP to continue.`);
+  }
+}
+// Record what a request cost. Only kept when a cap is set. Returns the new total.
+function addSpend(amount) {
+  if (spendCap() == null) return null;
+  const total = spentToday() + (amount || 0);
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(SPEND_FILE, JSON.stringify({ date: today(), usd: total }));
+  return total;
+}
+const spendLine = (total) => (total == null ? null : `spent today ${usd(total)} of ${usd(spendCap())}`);
+
 async function ask(prompt, flags) { // prompt may gain piped text below
   // --stdin adds whatever was piped in, so `cat notes.txt | plus ask "Summarise:" --stdin` works.
   // It is a flag, not automatic, because a program that starts us with an
@@ -428,9 +574,17 @@ async function ask(prompt, flags) { // prompt may gain piped text below
     prompt = [prompt, piped.trim()].filter(Boolean).join("\n\n");
   }
   if (!prompt) fail(`Usage: ${NAME} ask "your question" [-m model] [--stdin]`);
-  const model = flags.model ?? DEFAULT_MODEL;
-  let requestId = null;
+  const auto = flags.model === "auto";
+  const model = auto ? AUTO_MODEL : (flags.model ?? DEFAULT_MODEL);
+  checkSpendCap();
   const started = performance.now();
+
+  // One try at the request. It throws an error marked `retryable` when
+  // trying again could help and nothing has been printed yet: a 5xx reply, or
+  // a connection that died before any of the answer arrived.
+  const retryable = (message) => Object.assign(new Error(message), { retryable: true });
+  const attempt = async () => {
+  let requestId = null;
   let firstToken = null;
   let usage = null;
   let finished = false; // the model said it was done, or [DONE] arrived
@@ -485,7 +639,11 @@ async function ask(prompt, flags) { // prompt may gain piped text below
         stream_options: { include_usage: true }, // cost arrives in the last event
       }),
     });
-    if (!res.ok) fail(`chat answered ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) {
+      const message = `chat answered ${res.status}: ${(await res.text()).slice(0, 300)}`;
+      if (res.status >= 500) throw retryable(message);
+      fail(message);
+    }
     requestId = res.headers.get("x-request-id");
     gotResponse = true;
 
@@ -508,8 +666,10 @@ async function ask(prompt, flags) { // prompt may gain piped text below
       if (request.signal.reason === "silence") {
         fail(`no data for ${waitSeconds} s, so the request was dropped. Wait longer with --wait <seconds>.`);
       }
-      if (gotResponse) fail("the connection was dropped before the answer finished.");
-      throw err;
+      if (err.retryable) throw err;
+      if (firstToken) fail("the connection was dropped before the answer finished.");
+      // Nothing was printed, so another try cannot show the answer twice.
+      throw retryable(gotResponse ? "the connection was dropped before any answer arrived" : `could not reach Surplus: ${err.message}`);
     }
   } finally {
     clearTimeout(watchdog); // a timer left running would keep the program alive
@@ -519,6 +679,23 @@ async function ask(prompt, flags) { // prompt may gain piped text below
     console.log();
     fail("the answer was cut off: the stream ended with no finish marker.");
   }
+  return { requestId, firstToken, usage };
+  };
+
+  // Up to two more tries. On each, Surplus is free to pick another seller.
+  let result;
+  let retries = 0;
+  for (;;) {
+    try {
+      result = await attempt();
+      break;
+    } catch (err) {
+      if (!err.retryable) throw err;
+      if (retries === MAX_RETRIES) fail(`the request failed ${retries + 1} times. Last error: ${err.message}`);
+      retries++;
+    }
+  }
+  const { requestId, firstToken, usage } = result;
   const total = performance.now() - started;
 
   // The receipt: what it cost against the list price for the same tokens.
@@ -530,13 +707,15 @@ async function ask(prompt, flags) { // prompt may gain piped text below
   ]);
   const list = listPrice(info?.pricing, usage);
   const parts = [
-    seller ? `${model} via ${seller}` : model,
+    `${auto ? "auto -> " : ""}${model}${seller ? ` via ${seller}` : ""}`,
     firstToken ? `first token ${((firstToken - started) / 1000).toFixed(1)} s` : "no text",
     `total ${(total / 1000).toFixed(1)} s`,
     usage ? `${usage.completion_tokens} tokens` : null,
     // Surplus bills in whole millionths of a dollar, so a tiny answer can round to 0.
     usage?.buyer_cost_micro != null ? `cost ${paid === 0 ? "under $0.000001" : usd(paid)}` : null,
     list ? `list ${usd(list)}${paid > 0 ? `, saved ${savedPct(paid, list)}%` : ""}` : null,
+    retries ? `retried ${retries} time${retries > 1 ? "s" : ""}` : null,
+    spendLine(addSpend(paid)),
   ].filter(Boolean);
   console.log(`\n\n· ${parts.join(" · ")}`);
 }
@@ -588,7 +767,9 @@ async function compare(prompt, flags) {
       return { model, error: err.name === "TimeoutError" ? `no answer in ${waitMs / 1000} s` : err.message };
     }
   };
+  checkSpendCap();
   const results = await Promise.all(models.map(one)); // all at once, so the wait is the slowest one
+  addSpend(results.reduce((sum, r) => sum + (r.paid || 0), 0));
 
   if (flags.json) return console.log(JSON.stringify(results, null, 2));
   const rows = results.map((r) =>
@@ -912,6 +1093,7 @@ async function bench(flags) {
       return false;
     });
     if (routers.length === 0) fail("No router has a key. Set SURPLUS_API_KEY, OPENROUTER_API_KEY, or RAMP_ROUTER_API_KEY.");
+    checkSpendCap();
     for (const r of routers) if (r.priceFromCatalog) r.prices = await catalogPrices(r);
     // Routers run side by side; within a router, one request at a time, so
     // they do not slow each other down.
@@ -924,6 +1106,7 @@ async function bench(flags) {
       }),
     );
     samples = perRouter.flat();
+    addSpend(samples.reduce((sum, x) => sum + (x.costUsd || 0), 0));
     note = `Live run, ${new Date().toISOString()}. ${BENCH_PROMPTS.length} prompts x ${runs} run(s) per model per router.`;
     if (flags.save) writeFileSync(flags.save, JSON.stringify({ note, samples }, null, 2));
   } else {
@@ -967,6 +1150,7 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} topup <dollars>              add credit by card (10 to 2000)
   ${NAME} topup --usdc                 where to send USDC instead
   ${NAME} ask "question" [-m model]    stream an answer, then show its cost
+                                      (-m auto: a cheap open-weight model, named on the receipt)
                                       (--wait 90: seconds of silence before giving up)
                                       (--stdin: add piped text to the question)
   ${NAME} compare "question" -m a,b    one question, several models, side by side
@@ -974,6 +1158,7 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} savings                      what you saved, model by model
   ${NAME} price <model>                cheapest live sellers against list price
   ${NAME} logs [-n 10]                 your recent requests
+  ${NAME} models                       a short list: Surplus price next to an Arena quality score
   ${NAME} doctor                       check your setup, one thing at a time
   ${NAME} bench --live [-m a,b]        Surplus, OpenRouter and Ramp, same prompts, side by side
                                       (--fixture <file>: replay saved results, no keys or network)
@@ -983,8 +1168,10 @@ const HELP = `${NAME}: Surplus Intelligence from the terminal
   ${NAME} aider [arguments]            aider, running on Surplus
   ${NAME} opencode [arguments]         OpenCode, running on Surplus
   ${NAME} run <program> [arguments]    any other tool, pointed at Surplus
+  ${NAME} run --print-env              the settings it uses, and how Cursor and Kilo take them
   ${NAME} update                       install the latest version
 
+  ask retries twice on a failed start. PLUS_SPEND_CAP=<dollars> limits a day's spending by ask, compare and bench.
   Launchers take --model first to pick the model: ${NAME} claude --model glm-5.3
 
   balance, savings, price, logs and compare take --json for scripts.
@@ -995,6 +1182,7 @@ async function main() {
   // flag parsing.
   const [first, ...passthrough] = process.argv.slice(2);
   if (LAUNCHERS.includes(first)) return run(first, passthrough);
+  if (first === "run" && passthrough[0] === "--print-env") return printEnv();
   if (first === "run") return run(passthrough[0], passthrough.slice(1));
   if (first === "--version" || first === "-v") return console.log(VERSION);
 
@@ -1031,6 +1219,7 @@ async function main() {
   if (command === "ask") return ask(rest.join(" "), values);
   if (command === "compare") return compare(rest.join(" "), values);
   if (command === "doctor") return doctor();
+  if (command === "models") return models(values);
   if (command === "update") return update(values);
   if (command === "bench") return bench(values);
   fail(`Unknown command "${command}".\n\n${HELP}`);
